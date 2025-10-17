@@ -1,0 +1,17 @@
+# Docker Compose 配置示例 - WebSocket 和 Redis 混合部署
+# 
+# 此示例展示如何同时部署使用 WebSocket 和 Redis 的 worker
+
+version: '3.8'
+
+services:
+  # Redis 服务（用于 worker 注册和状态管理）
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3

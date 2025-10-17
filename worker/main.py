@@ -4,7 +4,7 @@ from utils import get_logger
 from config import WorkerConfig
 from hw import collect_hw
 from lifecycle import Lifecycle
-from redis_worker import RedisWorker
+from worker_transport import RedisTransport, WebSocketTransport
 from runner import Runner
 from power import PowerMonitor
 
@@ -40,7 +40,8 @@ def initialize_executors(
     def init_executor(key: str, *, gpu_required: bool = False):
         cls = registry.get(key)
         if cls is None:
-            reason = import_errors.get(EXECUTOR_CLASS_NAMES.get(key, key), "依赖缺失")
+            reason = import_errors.get(
+                EXECUTOR_CLASS_NAMES.get(key, key), "依赖缺失")
             logger.info("跳过执行器 %s：%s", key, reason)
             return None
 
@@ -57,45 +58,88 @@ def initialize_executors(
     executors: dict[str, object] = {}
     default_executor = init_executor("default")
     if not default_executor:
-        raise SystemExit("HFTransformers 执行器不可用，请安装 inference 扩展依赖 (mloc[inference])")
+        raise SystemExit(
+            "HFTransformers 执行器不可用，请安装 inference 扩展依赖 (mloc[inference])")
     executors["default"] = default_executor
 
-    for key in ["echo", "rag", "agent", "sft", "lora_sft"]:
+    for key in ["echo"]:
         inst = init_executor(key)
         if inst:
             executors[key] = inst
 
-    for key in ["vllm", "ppo", "dpo"]:
-        inst = init_executor(key, gpu_required=True)
-        if inst:
-            executors[key] = inst
+    # for key in ["vllm", "ppo", "dpo"]:
+    #     inst = init_executor(key, gpu_required=True)
+    #     if inst:
+    #         executors[key] = inst
 
     return executors, default_executor
+
 
 def main():
     cfg = WorkerConfig.from_env()
     logger = get_logger(name="worker", level=cfg.log_level)
 
-    redis_url = cfg.redis_url
-    if not redis_url:
-        logger.warning("No REDIS_URL configured, falling back to default localhost")
-        redis_url = "redis://localhost:6379/0"
-    rds = redis.from_url(redis_url, decode_responses=True)
-    rds.ping()
+    # Initialize WebSocket client first if enabled
+    websocket_client = None
+    if cfg.use_websocket:
+        try:
+            from websocket_client import WebSocketClient
+            websocket_client = WebSocketClient(
+                orchestrator_url=cfg.orchestrator_url,
+                worker_id=cfg.worker_id,
+                logger=logger,
+            )
+            logger.info(
+                "WebSocket transport enabled, will connect to %s", cfg.orchestrator_url)
+        except ImportError as exc:
+            logger.error(
+                "WebSocket transport requested but websockets package not installed: %s. "
+                "Install with: pip install websockets", exc
+            )
+            raise SystemExit(1)
 
-    rworker = RedisWorker(rds, cfg.worker_id)
+    # Initialize transport layer
+    if cfg.use_websocket and websocket_client:
+        # WebSocket mode - no Redis required
+        logger.info("Using WebSocket transport (Redis-free mode)")
+        transport = WebSocketTransport(cfg.worker_id, websocket_client)
+        # Redis is optional in WebSocket mode
+        rds = None
+    else:
+        # Redis mode
+        logger.info("Using Redis transport")
+        redis_url = cfg.redis_url
+        if not redis_url:
+            logger.warning(
+                "No REDIS_URL configured, falling back to default localhost")
+            redis_url = "redis://localhost:6379/0"
+        rds = redis.from_url(redis_url, decode_responses=True)
+        rds.ping()
+        transport = RedisTransport(rds, cfg.worker_id)
+
     lifecycle = Lifecycle(
-        rworker,
+        transport,
         cfg.hb_interval_sec,
         cfg.hb_ttl_sec,
         cost_per_hour=cfg.cost_per_hour,
         power_monitor=PowerMonitor(),
+        websocket_client=websocket_client,
     )
     lifecycle.start(env={}, hardware=collect_hw(), tags=cfg.tags)
 
-    executors, default_executor = initialize_executors(logger)
+    executors, default_executor = initialize_executors(
+        logger, cuda_available=False)
 
-    runner = Runner(lifecycle, rds, cfg.topic, cfg.results_dir, executors, default_executor, logger)
+    runner = Runner(
+        lifecycle,
+        rds,
+        cfg.topic,
+        cfg.results_dir,
+        executors,
+        default_executor,
+        logger,
+        use_websocket=cfg.use_websocket,
+    )
     try:
         runner.start()
     except KeyboardInterrupt:

@@ -1,0 +1,177 @@
+# Docker Compose 配置示例 - WebSocket 和 Redis 混合部署
+# 
+# 此示例展示如何同时部署使用 WebSocket 和 Redis 的 worker
+
+version: '3.8'
+
+services:
+  # Redis 服务（用于 worker 注册和状态管理）
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Orchestrator 服务
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      RESULTS_DIR: "/results"
+      LOG_LEVEL: "INFO"
+      # 可选：启用认证
+      # ORCHESTRATOR_TOKEN: "your-secret-token"
+    volumes:
+      - ./results_host:/results
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # WebSocket Worker 1 - 使用 WebSocket 长连接
+  worker-websocket-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      # WebSocket 配置
+      WORKER_USE_WEBSOCKET: "true"
+      ORCHESTRATOR_BASE_URL: "http://orchestrator:8000"
+      
+      # Worker 配置
+      WORKER_ID: "worker-ws-001"
+      REDIS_URL: "redis://redis:6379/0"
+      WORKER_COST_PER_HOUR: "3.5"
+      WORKER_TAGS: "gpu,inference,websocket"
+      
+      # 其他配置
+      TASK_TOPIC: "tasks"
+      RESULTS_DIR: "/results"
+      HEARTBEAT_INTERVAL_SEC: "30"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - ./results_workers:/results
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # WebSocket Worker 2 - 另一个使用 WebSocket 的 worker
+  worker-websocket-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      WORKER_USE_WEBSOCKET: "true"
+      ORCHESTRATOR_BASE_URL: "http://orchestrator:8000"
+      WORKER_ID: "worker-ws-002"
+      REDIS_URL: "redis://redis:6379/0"
+      WORKER_COST_PER_HOUR: "3.5"
+      WORKER_TAGS: "gpu,inference,websocket"
+      RESULTS_DIR: "/results"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - ./results_workers:/results
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Redis Worker - 使用传统 Redis Pub/Sub
+  worker-redis-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      # 不启用 WebSocket
+      WORKER_USE_WEBSOCKET: "false"
+      
+      # Worker 配置
+      WORKER_ID: "worker-redis-001"
+      REDIS_URL: "redis://redis:6379/0"
+      WORKER_COST_PER_HOUR: "2.5"
+      WORKER_TAGS: "cpu,training"
+      
+      # 其他配置
+      TASK_TOPIC: "tasks"
+      RESULTS_DIR: "/results"
+      HEARTBEAT_INTERVAL_SEC: "30"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - ./results_workers:/results
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Redis Worker 2 - 另一个使用 Redis 的 worker
+  worker-redis-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      WORKER_USE_WEBSOCKET: "false"
+      WORKER_ID: "worker-redis-002"
+      REDIS_URL: "redis://redis:6379/0"
+      WORKER_COST_PER_HOUR: "2.0"
+      WORKER_TAGS: "cpu,inference"
+      RESULTS_DIR: "/results"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - ./results_workers:/results
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  results_host:
+  results_workers:
+
+# ============================================
+# 使用说明
+# ============================================
+# 
+# 1. 启动所有服务（混合模式）：
+#    docker-compose -f docker-compose.websocket.yml up -d
+# 
+# 2. 仅启动 WebSocket workers：
+#    docker-compose -f docker-compose.websocket.yml up -d orchestrator redis worker-websocket-1 worker-websocket-2
+# 
+# 3. 仅启动 Redis workers：
+#    docker-compose -f docker-compose.websocket.yml up -d orchestrator redis worker-redis-1 worker-redis-2
+# 
+# 4. 查看日志：
+#    docker-compose -f docker-compose.websocket.yml logs -f worker-websocket-1
+# 
+# 5. 检查 WebSocket 连接状态：
+#    curl http://localhost:8000/ws/stats
+# 
+# 6. 查看所有 workers：
+#    curl http://localhost:8000/workers
+# 
+# 7. 停止所有服务：
+#    docker-compose -f docker-compose.websocket.yml down
+# 
+# 8. 扩展 WebSocket workers：
+#    docker-compose -f docker-compose.websocket.yml up -d --scale worker-websocket-1=3
+#

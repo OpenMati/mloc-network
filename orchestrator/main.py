@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
 
 import redis
-from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from utils import (
@@ -42,6 +42,7 @@ from state_store import StateManager
 from manifest_utils import sync_manifest, ARTIFACTS_DIR
 from event_schema import parse_event, TaskEvent, WorkerEvent
 from metrics import MetricsRecorder
+from websocket_manager import WebSocketManager
 
 # -------------------------
 # Settings & globals
@@ -60,7 +61,8 @@ logger = get_logger(
 )
 
 # results directory
-RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "./results_host")).expanduser().resolve()
+RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "./results_host")
+                   ).expanduser().resolve()
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Redis connection
@@ -78,6 +80,7 @@ except Exception as e:
 # -------------------------
 ORCH_BEARER = os.getenv("ORCHESTRATOR_TOKEN")
 
+
 async def require_auth(request: Request):
     if not ORCH_BEARER:
         return
@@ -91,13 +94,17 @@ async def require_auth(request: Request):
 # Models
 # -------------------------
 TASK_POOL_BATCH_SIZE = parse_int_env("TASK_POOL_BATCH_SIZE", 5)
-TASK_SLO_DISPATCH_THRESHOLD = max(0.0, min(1.0, parse_float_env("TASK_SLO_THRESHOLD", 0.5)))
+TASK_SLO_DISPATCH_THRESHOLD = max(
+    0.0, min(1.0, parse_float_env("TASK_SLO_THRESHOLD", 0.5)))
 
 TASKS: Dict[str, TaskRecord] = {}
 TASKS_LOCK = threading.RLock()
 
 PARENT_SHARDS: Dict[str, Dict[str, Any]] = {}
 CHILD_TO_PARENT: Dict[str, str] = {}
+
+# WebSocket Manager (optional transport)
+WEBSOCKET_MANAGER = WebSocketManager(logger)
 
 TASK_STORE = TaskStore()
 DISPATCHER = DispatchManager(
@@ -109,6 +116,7 @@ DISPATCHER = DispatchManager(
     child_to_parent=CHILD_TO_PARENT,
     results_dir=RESULTS_DIR,
     logger=logger,
+    websocket_manager=WEBSOCKET_MANAGER,
 )
 DISPATCHER.configure_task_store(
     batch_size=TASK_POOL_BATCH_SIZE,
@@ -117,7 +125,8 @@ DISPATCHER.configure_task_store(
     done_status=TaskStatus.DONE,
 )
 
-STATE_DIR = Path(os.getenv("ORCHESTRATOR_STATE_DIR", RESULTS_DIR.parent / "state")).expanduser().resolve()
+STATE_DIR = Path(os.getenv("ORCHESTRATOR_STATE_DIR",
+                 RESULTS_DIR.parent / "state")).expanduser().resolve()
 STATE_ENABLED = parse_bool_env("ORCHESTRATOR_STATE_ENABLED", False)
 STATE_FLUSH_INTERVAL = parse_float_env("STATE_FLUSH_INTERVAL_SEC", 5.0)
 if STATE_ENABLED:
@@ -133,16 +142,20 @@ if STATE_ENABLED:
     )
 else:
     STATE_MANAGER = None
-    logger.info("State persistence disabled. Set ORCHESTRATOR_STATE_ENABLED=1 to enable state snapshots.")
+    logger.info(
+        "State persistence disabled. Set ORCHESTRATOR_STATE_ENABLED=1 to enable state snapshots.")
 
-DEFAULT_METRICS_DIR = STATE_DIR / "metrics" if STATE_ENABLED else RESULTS_DIR.parent / "metrics"
-METRICS_DIR = Path(os.getenv("ORCHESTRATOR_METRICS_DIR", str(DEFAULT_METRICS_DIR))).expanduser().resolve()
+DEFAULT_METRICS_DIR = STATE_DIR / \
+    "metrics" if STATE_ENABLED else RESULTS_DIR.parent / "metrics"
+METRICS_DIR = Path(os.getenv("ORCHESTRATOR_METRICS_DIR",
+                   str(DEFAULT_METRICS_DIR))).expanduser().resolve()
 METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
 
 
 def _state_mark_dirty() -> None:
     if STATE_MANAGER:
         STATE_MANAGER.mark_dirty()
+
 
 def _export_metrics_on_exit() -> None:
     try:
@@ -157,6 +170,7 @@ def _export_metrics_on_exit() -> None:
     except Exception as exc:  # noqa: broad-except
         logger.warning("Failed to export final metrics on shutdown: %s", exc)
 
+
 atexit.register(_export_metrics_on_exit)
 
 if STATE_MANAGER:
@@ -164,7 +178,8 @@ if STATE_MANAGER:
 else:
     _restored_tasks = []
 if _restored_tasks:
-    logger.info("Restoring %d pending tasks from snapshot", len(_restored_tasks))
+    logger.info("Restoring %d pending tasks from snapshot",
+                len(_restored_tasks))
     restored_count = 0
     for task_id in _restored_tasks:
         payload = TASK_STORE.get_parsed(task_id)
@@ -180,7 +195,8 @@ if _restored_tasks:
             DISPATCHER.enqueue_for_dispatch(task_id, payload, rec)
             restored_count += 1
         except Exception as exc:
-            logger.exception("Failed to enqueue restored task %s: %s", task_id, exc)
+            logger.exception(
+                "Failed to enqueue restored task %s: %s", task_id, exc)
     if restored_count:
         TASK_STORE.flush_pool()
         logger.info("Requeued %d tasks after restoration", restored_count)
@@ -191,17 +207,21 @@ if _restored_tasks:
 # -------------------------
 app = FastAPI(title="Orchestrator", version="1.0.0")
 
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
 
 @app.get("/metrics")
 async def get_metrics(_: Any = Depends(require_auth)):
     return METRICS_RECORDER.snapshot()
 
+
 @app.get("/workers")
 async def list_workers(_: Any = Depends(require_auth)):
     return list_workers_from_redis(rds)
+
 
 @app.get("/workers/{worker_id}")
 async def get_worker(worker_id: str, _: Any = Depends(require_auth)):
@@ -212,8 +232,59 @@ async def get_worker(worker_id: str, _: Any = Depends(require_auth)):
     return {**w.model_dump(), "stale": stale}
 
 # -------------------------
+# WebSocket endpoint for worker connections
+# -------------------------
+
+
+@app.websocket("/ws/worker/{worker_id}")
+async def websocket_worker_endpoint(websocket: WebSocket, worker_id: str):
+    """WebSocket endpoint for worker long connections.
+
+    Workers can connect here to receive tasks and send events/heartbeats
+    instead of using Redis Pub/Sub.
+    """
+    await websocket.accept()
+    logger.info("Worker %s connected via WebSocket", worker_id)
+
+    async def handle_worker_event(event_data: Dict[str, Any]):
+        """Process events received from worker via WebSocket."""
+        try:
+            # Parse and handle the event similar to Redis events
+            event = parse_event(event_data)
+
+            if isinstance(event, WorkerEvent):
+                log_worker_event(logger, event)
+                METRICS_RECORDER.record_worker_event(event)
+
+                # Handle worker unregister
+                if event.type == "UNREGISTER":
+                    _reschedule_tasks_for_worker(event.worker_id)
+
+            elif isinstance(event, TaskEvent):
+                # Handle task events from WebSocket (same logic as Redis)
+                await _handle_task_event(event)
+            else:
+                logger.debug("Unknown event type from worker %s: %s",
+                             worker_id, event_data)
+        except Exception as exc:
+            logger.exception(
+                "Error handling WebSocket event from worker %s: %s", worker_id, exc)
+
+    await WEBSOCKET_MANAGER.handle_worker_connection(
+        worker_id, websocket, event_callback=handle_worker_event
+    )
+
+
+@app.get("/ws/stats")
+async def websocket_stats(_: Any = Depends(require_auth)):
+    """Get WebSocket connection statistics."""
+    return WEBSOCKET_MANAGER.get_connection_stats()
+
+# -------------------------
 # Result ingestion
 # -------------------------
+
+
 @app.post("/api/v1/results")
 async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
     task_id = payload.task_id.strip()
@@ -270,7 +341,8 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
 
     expected_artifacts: List[str] = []
     if rec:
-        expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+        expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get(
+            "output", {}).get("artifacts", []) or []
     sync_manifest(file_path.parent, task_id, expected_artifacts)
     _state_mark_dirty()
     return {"ok": True, "path": str(file_path)}
@@ -290,7 +362,8 @@ async def get_result(task_id: str, _: Any = Depends(require_auth)):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="result not found")
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to read result: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Failed to read result: {exc}") from exc
 
     try:
         data = json.loads(content)
@@ -332,7 +405,8 @@ async def upload_result_file(
     with TASKS_LOCK:
         rec = TASKS.get(safe_task_id)
         if rec:
-            expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+            expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get(
+                "output", {}).get("artifacts", []) or []
     sync_manifest(base_dir, safe_task_id, expected_artifacts)
     _state_mark_dirty()
     return {"ok": True, "path": str(target_path)}
@@ -361,6 +435,185 @@ async def download_result_file(
 
     return FileResponse(target_path)
 
+
+def _handle_task_event_sync(event: TaskEvent) -> None:
+    """Process a task event (extracted from _tasks_events_loop).
+
+    This function contains the core task event handling logic that can be called
+    from both Redis Pub/Sub and WebSocket handlers.
+    """
+    ev_type = event.type
+    task_id = event.task_id
+    worker_id = event.worker_id
+    err_msg = event.error
+
+    if not task_id:
+        return
+
+    with TASKS_LOCK:
+        rec = TASKS.get(task_id)
+        parent_id = CHILD_TO_PARENT.get(task_id)
+
+    METRICS_RECORDER.record_task_event(event, is_child=bool(parent_id))
+    state_dirty = False
+
+    if ev_type == "TASK_STARTED":
+        with TASKS_LOCK:
+            rec = TASKS.get(task_id)
+            if rec:
+                payload = event.payload or {}
+                start_iso = payload.get("started_at") or event.ts
+                rec.started_ts = parse_iso_ts(start_iso)
+                dispatch_iso = payload.get("dispatched_at")
+                if dispatch_iso:
+                    rec.dispatched_ts = parse_iso_ts(dispatch_iso)
+                elif not rec.dispatched_ts:
+                    rec.dispatched_ts = rec.started_ts
+                rec.attempts = int(rec.attempts or 0) + 1
+        return
+
+    if ev_type == 'TASK_SUCCEEDED':
+        logger.info("Task succeeded: %s", task_id)
+        TASK_STORE.clear_from_pool(task_id)
+        state_dirty = True
+        if rec:
+            with TASKS_LOCK:
+                rec.status = TaskStatus.DONE
+                rec.error = None
+                payload = event.payload or {}
+                rec.finished_ts = parse_iso_ts(
+                    payload.get("finished_at") or event.ts)
+                rec.started_ts = parse_iso_ts(
+                    payload.get("started_at") or event.ts)
+        if worker_id:
+            try:
+                update_worker_status(rds, worker_id, "IDLE")
+            except Exception:
+                pass
+
+        if parent_id:
+            with TASKS_LOCK:
+                aggr = PARENT_SHARDS.get(parent_id)
+                if aggr:
+                    aggr["done"] += 1
+                    if aggr["done"] >= aggr["total"]:
+                        parent_rec = TASKS.get(parent_id)
+                        if parent_rec:
+                            parent_rec.status = TaskStatus.DONE
+                            parent_rec.error = None
+        TASK_STORE.flush_pool()
+        if state_dirty:
+            _state_mark_dirty()
+        return
+
+    elif ev_type == 'TASK_FAILED':
+        logger.info("Task failed: %s", task_id)
+        TASK_STORE.clear_from_pool(task_id)
+        TASK_STORE.forget_worker(worker_id)
+        retries_left = -1
+        if rec:
+            with TASKS_LOCK:
+                rec.status = TaskStatus.FAILED
+                rec.error = str(err_msg or "worker failed")
+                rec.retries += 1
+                rec.last_failed_worker = worker_id
+                retries_left = rec.max_retries - rec.retries
+                payload = event.payload or {}
+                rec.finished_ts = parse_iso_ts(
+                    payload.get("finished_at") or event.ts)
+                rec.started_ts = parse_iso_ts(
+                    payload.get("started_at") or event.ts)
+            state_dirty = True
+
+        if parent_id:
+            if rec and retries_left >= 0:
+                reason = rec.error or "Shard failed; retrying"
+                DISPATCHER.requeue_task(
+                    task_id,
+                    rec,
+                    reason,
+                    task=rec.parsed,
+                    exclude_worker_id=worker_id,
+                )
+                METRICS_RECORDER.record_task_event(
+                    TaskEvent(
+                        type="TASK_REQUEUED",
+                        task_id=task_id,
+                        worker_id=worker_id,
+                        error=reason,
+                    ),
+                    is_child=True,
+                )
+                with TASKS_LOCK:
+                    parent_rec = TASKS.get(parent_id)
+                    if parent_rec:
+                        parent_rec.status = TaskStatus.WAITING
+                        parent_rec.error = f"Waiting on shard retry: {task_id}"
+                TASK_STORE.flush_pool()
+                if state_dirty:
+                    _state_mark_dirty()
+                return
+            else:
+                with TASKS_LOCK:
+                    parent_rec = TASKS.get(parent_id)
+                    if parent_rec:
+                        parent_rec.status = TaskStatus.FAILED
+                        parent_rec.error = f"Child shard failed: {task_id}"
+                    if rec:
+                        rec.next_retry_at = None
+                _record_dead_letter(
+                    task_id, rec, worker_id, err_msg, parent_id=parent_id)
+                METRICS_RECORDER.finalize_task_failure(task_id)
+                TASK_STORE.flush_pool()
+                if state_dirty:
+                    _state_mark_dirty()
+                return
+        elif rec and retries_left >= 0:
+            parsed = TASK_STORE.get_parsed(task_id)
+            if parsed:
+                reason = rec.error or "Task failed; retrying"
+                DISPATCHER.requeue_task(
+                    task_id,
+                    rec,
+                    reason,
+                    task=parsed,
+                    exclude_worker_id=worker_id,
+                )
+                METRICS_RECORDER.record_task_event(
+                    TaskEvent(
+                        type="TASK_REQUEUED",
+                        task_id=task_id,
+                        worker_id=worker_id,
+                        error=reason,
+                    )
+                )
+                _state_mark_dirty()
+            return
+
+        if rec:
+            with TASKS_LOCK:
+                rec.next_retry_at = None
+            _propagate_merge_failure(rec)
+            _record_dead_letter(
+                task_id, rec, worker_id, err_msg, parent_id=parent_id)
+            state_dirty = True
+        METRICS_RECORDER.finalize_task_failure(task_id)
+        TASK_STORE.flush_pool()
+        if state_dirty:
+            _state_mark_dirty()
+        return
+    else:
+        logger.debug(
+            "tasks.events ignoring type=%s", ev_type)
+
+
+async def _handle_task_event(event: TaskEvent) -> None:
+    """Async wrapper for task event handling (for WebSocket)."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _handle_task_event_sync, event)
+
+
 def _tasks_events_loop() -> None:
     """Subscribe to tasks.events and handle shard aggregation & retries."""
     while True:
@@ -374,7 +627,8 @@ def _tasks_events_loop() -> None:
                     continue
                 raw = msg.get("data")
                 try:
-                    data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", "ignore"))
+                    data = json.loads(raw if isinstance(
+                        raw, str) else raw.decode("utf-8", "ignore"))
                 except Exception as e:
                     logger.warning("Bad tasks.events payload: %s", e)
                     continue
@@ -382,172 +636,23 @@ def _tasks_events_loop() -> None:
                 try:
                     event = parse_event(data)
                 except Exception as exc:
-                    logger.warning("Failed to parse task event payload: %s (%s)", data, exc)
+                    logger.warning(
+                        "Failed to parse task event payload: %s (%s)", data, exc)
                     continue
                 if not isinstance(event, TaskEvent):
-                    logger.debug("Ignoring non-task event on tasks channel: %s", data)
+                    logger.debug(
+                        "Ignoring non-task event on tasks channel: %s", data)
                     continue
 
-                ev_type = event.type
-                task_id = event.task_id
-                worker_id = event.worker_id
-                err_msg = event.error
-
-                if not task_id:
-                    continue
-
-                with TASKS_LOCK:
-                    rec = TASKS.get(task_id)
-                    parent_id = CHILD_TO_PARENT.get(task_id)
-
-                METRICS_RECORDER.record_task_event(event, is_child=bool(parent_id))
-                state_dirty = False
-
-                if ev_type == "TASK_STARTED":
-                    with TASKS_LOCK:
-                        rec = TASKS.get(task_id)
-                        if rec:
-                            payload = event.payload or {}
-                            start_iso = payload.get("started_at") or event.ts
-                            rec.started_ts = parse_iso_ts(start_iso)
-                            dispatch_iso = payload.get("dispatched_at")
-                            if dispatch_iso:
-                                rec.dispatched_ts = parse_iso_ts(dispatch_iso)
-                            elif not rec.dispatched_ts:
-                                rec.dispatched_ts = rec.started_ts
-                            rec.attempts = int(rec.attempts or 0) + 1
-                    continue
-
-                if ev_type == 'TASK_SUCCEEDED':
-                    logger.info("Task succeeded: %s", task_id)
-                    TASK_STORE.clear_from_pool(task_id)
-                    state_dirty = True
-                    if rec:
-                        with TASKS_LOCK:
-                            rec.status = TaskStatus.DONE
-                            rec.error = None
-                            payload = event.payload or {}
-                            rec.finished_ts = parse_iso_ts(payload.get("finished_at") or event.ts)
-                            rec.started_ts = parse_iso_ts(payload.get("started_at") or event.ts)
-                    if worker_id:
-                        try:
-                            update_worker_status(rds, worker_id, "IDLE")
-                        except Exception:
-                            pass
-
-                    if parent_id:
-                        with TASKS_LOCK:
-                            aggr = PARENT_SHARDS.get(parent_id)
-                            if aggr:
-                                aggr["done"] += 1
-                                if aggr["done"] >= aggr["total"]:
-                                    parent_rec = TASKS.get(parent_id)
-                                    if parent_rec:
-                                        parent_rec.status = TaskStatus.DONE
-                                        parent_rec.error = None
-                    TASK_STORE.flush_pool()
-                    if state_dirty:
-                        _state_mark_dirty()
-                    continue
-
-                elif ev_type == 'TASK_FAILED':
-                    logger.info("Task failed: %s", task_id)
-                    TASK_STORE.clear_from_pool(task_id)
-                    TASK_STORE.forget_worker(worker_id)
-                    retries_left = -1
-                    if rec:
-                        with TASKS_LOCK:
-                            rec.status = TaskStatus.FAILED
-                            rec.error = str(err_msg or "worker failed")
-                            rec.retries += 1
-                            rec.last_failed_worker = worker_id
-                            retries_left = rec.max_retries - rec.retries
-                            payload = event.payload or {}
-                            rec.finished_ts = parse_iso_ts(payload.get("finished_at") or event.ts)
-                            rec.started_ts = parse_iso_ts(payload.get("started_at") or event.ts)
-                        state_dirty = True
-
-                    if parent_id:
-                        if rec and retries_left >= 0:
-                            reason = rec.error or "Shard failed; retrying"
-                            DISPATCHER.requeue_task(
-                                task_id,
-                                rec,
-                                reason,
-                                task=rec.parsed,
-                                exclude_worker_id=worker_id,
-                            )
-                            METRICS_RECORDER.record_task_event(
-                                TaskEvent(
-                                    type="TASK_REQUEUED",
-                                    task_id=task_id,
-                                    worker_id=worker_id,
-                                    error=reason,
-                                ),
-                                is_child=True,
-                            )
-                            with TASKS_LOCK:
-                                parent_rec = TASKS.get(parent_id)
-                                if parent_rec:
-                                    parent_rec.status = TaskStatus.WAITING
-                                    parent_rec.error = f"Waiting on shard retry: {task_id}"
-                            TASK_STORE.flush_pool()
-                            if state_dirty:
-                                _state_mark_dirty()
-                            continue
-                        else:
-                            with TASKS_LOCK:
-                                parent_rec = TASKS.get(parent_id)
-                                if parent_rec:
-                                    parent_rec.status = TaskStatus.FAILED
-                                    parent_rec.error = f"Child shard failed: {task_id}"
-                                if rec:
-                                    rec.next_retry_at = None
-                            _record_dead_letter(task_id, rec, worker_id, err_msg, parent_id=parent_id)
-                            METRICS_RECORDER.finalize_task_failure(task_id)
-                            TASK_STORE.flush_pool()
-                            if state_dirty:
-                                _state_mark_dirty()
-                            continue
-                    elif rec and retries_left >= 0:
-                        parsed = TASK_STORE.get_parsed(task_id)
-                        if parsed:
-                            reason = rec.error or "Task failed; retrying"
-                            DISPATCHER.requeue_task(
-                                task_id,
-                                rec,
-                                reason,
-                                task=parsed,
-                                exclude_worker_id=worker_id,
-                            )
-                            METRICS_RECORDER.record_task_event(
-                                TaskEvent(
-                                    type="TASK_REQUEUED",
-                                    task_id=task_id,
-                                    worker_id=worker_id,
-                                    error=reason,
-                                )
-                            )
-                            _state_mark_dirty()
-                        continue
-
-                    if rec:
-                        with TASKS_LOCK:
-                            rec.next_retry_at = None
-                        _propagate_merge_failure(rec)
-                        _record_dead_letter(task_id, rec, worker_id, err_msg, parent_id=parent_id)
-                        state_dirty = True
-                    METRICS_RECORDER.finalize_task_failure(task_id)
-                    TASK_STORE.flush_pool()
-                    if state_dirty:
-                        _state_mark_dirty()
-                    continue
-
-                else:
-                    logger.debug("tasks.events ignoring type=%s payload=%s", ev_type, data)
+                # Use the extracted function to handle the event
+                try:
+                    _handle_task_event_sync(event)
+                except Exception as exc:
+                    logger.exception("Error handling task event: %s", exc)
 
         except Exception as e:
-            logger.warning("tasks.events listener error: %s; reconnecting soon...", e)
+            logger.warning(
+                "tasks.events listener error: %s; reconnecting soon...", e)
             time.sleep(2)
 
 
@@ -563,9 +668,11 @@ def _split_merged_result(task_id: str, content: Dict[str, Any]) -> Tuple[Dict[st
 
     parent_slice = slices.get(task_id, (0, total_items))
     parent_content = copy.deepcopy(content)
-    parent_content["result"] = _slice_result_section(base_result, items, parent_slice, total_items)
+    parent_content["result"] = _slice_result_section(
+        base_result, items, parent_slice, total_items)
     parent_meta = dict(parent_content.get("metadata") or {})
-    parent_meta.setdefault("merged_children", [cid for cid in slices.keys() if cid != task_id])
+    parent_meta.setdefault("merged_children", [
+                           cid for cid in slices.keys() if cid != task_id])
     parent_content["metadata"] = parent_meta
 
     child_payloads: Dict[str, Dict[str, Any]] = {}
@@ -574,7 +681,8 @@ def _split_merged_result(task_id: str, content: Dict[str, Any]) -> Tuple[Dict[st
             continue
         child_content = copy.deepcopy(content)
         child_content["task_id"] = child_id
-        child_content["result"] = _slice_result_section(base_result, items, slc, total_items)
+        child_content["result"] = _slice_result_section(
+            base_result, items, slc, total_items)
         child_meta = dict(child_content.get("metadata") or {})
         child_meta["merged_from"] = task_id
         child_meta["merged_slice"] = {"start": int(slc[0]), "end": int(slc[1])}
@@ -647,9 +755,11 @@ def _finalize_merge_children(parent_id: str, child_payloads: Dict[str, Dict[str,
     for child_id, payload in child_payloads.items():
         try:
             path = write_result(RESULTS_DIR, child_id, payload)
-            logger.info("Stored split result for merged task %s -> child %s at %s", parent_id, child_id, path)
+            logger.info(
+                "Stored split result for merged task %s -> child %s at %s", parent_id, child_id, path)
         except Exception as exc:
-            logger.warning("Failed to store split result for child %s derived from %s: %s", child_id, parent_id, exc)
+            logger.warning(
+                "Failed to store split result for child %s derived from %s: %s", child_id, parent_id, exc)
             continue
 
         with TASKS_LOCK:
@@ -659,7 +769,8 @@ def _finalize_merge_children(parent_id: str, child_payloads: Dict[str, Dict[str,
                 child_rec.error = None
                 child_rec.merged_parent_id = None
                 child_rec.merge_slice = None
-                expected_child_artifacts = ((child_rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+                expected_child_artifacts = ((child_rec.parsed or {}).get(
+                    "spec") or {}).get("output", {}).get("artifacts", []) or []
             else:
                 expected_child_artifacts = []
         sync_manifest(path.parent, child_id, expected_child_artifacts)
@@ -682,17 +793,20 @@ def _workers_events_loop() -> None:
                     continue
                 raw = msg.get("data")
                 try:
-                    data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", "ignore"))
+                    data = json.loads(raw if isinstance(
+                        raw, str) else raw.decode("utf-8", "ignore"))
                 except Exception as exc:
                     logger.debug("Bad workers.events payload: %s", exc)
                     continue
                 try:
                     event = parse_event(data)
                 except Exception as exc:
-                    logger.debug("Failed to parse worker event: %s (%s)", data, exc)
+                    logger.debug(
+                        "Failed to parse worker event: %s (%s)", data, exc)
                     continue
                 if not isinstance(event, WorkerEvent):
-                    logger.debug("Ignoring non-worker event on workers channel: %s", data)
+                    logger.debug(
+                        "Ignoring non-worker event on workers channel: %s", data)
                     continue
                 log_worker_event(logger, event)
                 METRICS_RECORDER.record_worker_event(event)
@@ -700,7 +814,8 @@ def _workers_events_loop() -> None:
                 if event.type == "UNREGISTER":
                     _reschedule_tasks_for_worker(event.worker_id)
         except Exception as exc:
-            logger.warning("workers.events listener error: %s; reconnecting soon...", exc)
+            logger.warning(
+                "workers.events listener error: %s; reconnecting soon...", exc)
             time.sleep(2)
 
 
@@ -763,7 +878,8 @@ def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
                 child_rec.merged_parent_id = None
                 child_rec.merge_slice = None
         TASK_STORE.mark_released(child_id)
-        logger.info("Propagated merged failure from %s to child %s", parent_id, child_id)
+        logger.info("Propagated merged failure from %s to child %s",
+                    parent_id, child_id)
 
     TASK_STORE.clear_merge(parent_id)
     _state_mark_dirty()
@@ -793,9 +909,11 @@ def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
                 child_rec.merged_parent_id = None
                 child_rec.merge_slice = None
         TASK_STORE.mark_released(child_id)
-        logger.info("Propagated merged failure from %s to child %s", parent_id, child_id)
+        logger.info("Propagated merged failure from %s to child %s",
+                    parent_id, child_id)
 
     TASK_STORE.clear_merge(parent_id)
+
 
 def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
     """Move dispatched tasks back to waiting when their worker disappears."""
@@ -828,7 +946,8 @@ def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
             task=rec.parsed,
             exclude_worker_id=safe_worker_id,
         )
-        logger.info("Rescheduling %s after worker %s unregistered", task_id, safe_worker_id)
+        logger.info("Rescheduling %s after worker %s unregistered",
+                    task_id, safe_worker_id)
         changed = True
 
         if parent_id:
@@ -840,7 +959,8 @@ def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
                     changed = True
     if changed:
         _state_mark_dirty()
-    
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     if STATE_MANAGER:
@@ -850,8 +970,10 @@ async def _lifespan(_: FastAPI):
             TASK_STORE.flush_pool()
         except Exception as exc:
             logger.warning("Initial dispatch scan failed: %s", exc)
-        threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True).start()
-        threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True).start()
+        threading.Thread(target=_tasks_events_loop,
+                         name="tasks-events", daemon=True).start()
+        threading.Thread(target=_workers_events_loop,
+                         name="workers-events", daemon=True).start()
         yield
     finally:
         if STATE_MANAGER:
@@ -863,6 +985,8 @@ app.router.lifespan_context = _lifespan
 # -------------------------
 # Task submission & queries
 # -------------------------
+
+
 @app.post("/api/v1/tasks")
 async def submit_task(request: Request, _: Any = Depends(require_auth)):
     raw_body = await request.body()
@@ -876,22 +1000,26 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
         try:
             data = json.loads(raw_body)
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid JSON payload: {exc}")
 
         if isinstance(data, dict) and "yaml" in data:
             yml = str(data["yaml"])
         elif isinstance(data, str):
             yml = data
         else:
-            raise HTTPException(status_code=400, detail='Expected YAML string or {"yaml":"..."} in JSON body')
+            raise HTTPException(
+                status_code=400, detail='Expected YAML string or {"yaml":"..."} in JSON body')
     else:
         try:
             yml = raw_body.decode("utf-8")
         except UnicodeDecodeError:
-            raise HTTPException(status_code=400, detail="Body must be UTF-8 encoded text")
+            raise HTTPException(
+                status_code=400, detail="Body must be UTF-8 encoded text")
 
     if yml is None or yml.strip() == "":
-        raise HTTPException(status_code=400, detail="YAML payload cannot be empty")
+        raise HTTPException(
+            status_code=400, detail="YAML payload cannot be empty")
 
     entries = TASK_STORE.parse_and_register(yml)
     results: List[Dict[str, Any]] = []
@@ -947,10 +1075,12 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
     _state_mark_dirty()
     return {"ok": True, "count": len(entries), "tasks": results}
 
+
 @app.get("/api/v1/tasks")
 async def list_tasks(_: Any = Depends(require_auth)):
     with TASKS_LOCK:
         return [t.model_dump() for t in TASKS.values()]
+
 
 @app.get("/api/v1/tasks/{task_id}")
 async def get_task(task_id: str = ApiPath(..., min_length=1), _: Any = Depends(require_auth)):

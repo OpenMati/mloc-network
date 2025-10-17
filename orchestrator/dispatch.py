@@ -26,21 +26,24 @@ from utils import now_iso, safe_get
 
 
 # Base requeue timing; small jitter reduces requeue stampedes.
-REQUEUE_BASE_DELAY_SEC = max(0.0, float(os.getenv("TASK_REQUEUE_DELAY_SEC", "3")))
-REQUEUE_MAX_DELAY_SEC = max(REQUEUE_BASE_DELAY_SEC, float(os.getenv("TASK_REQUEUE_MAX_DELAY_SEC", "30")))
+REQUEUE_BASE_DELAY_SEC = max(0.0, float(
+    os.getenv("TASK_REQUEUE_DELAY_SEC", "3")))
+REQUEUE_MAX_DELAY_SEC = max(REQUEUE_BASE_DELAY_SEC, float(
+    os.getenv("TASK_REQUEUE_MAX_DELAY_SEC", "30")))
 REQUEUE_JITTER_FRAC = 0.15  # +/- 15% jitter to avoid synchronized retries
 
 
 class DispatchManager:
     """
     Central dispatcher that integrates TaskStore's SLO-aware pool with
-    worker selection and Redis-based publication.
+    worker selection and Redis-based publication or WebSocket delivery.
 
     Responsibilities:
       - Configure TaskStore with dispatch callback.
       - Enqueue tasks and trigger pool scans.
       - Single-worker dispatch with backoff requeue on failure.
       - Data-parallel (sharded) dispatch and child TaskRecord creation.
+      - Support WebSocket transport as alternative to Redis Pub/Sub.
     """
 
     def __init__(
@@ -54,6 +57,7 @@ class DispatchManager:
         child_to_parent: Dict[str, str],
         results_dir: Path,
         logger: logging.Logger,
+        websocket_manager=None,
     ) -> None:
         self._task_store = task_store
         self._redis = redis_client
@@ -63,6 +67,7 @@ class DispatchManager:
         self._child_to_parent = child_to_parent
         self._results_dir = results_dir
         self._logger = logger
+        self._websocket_manager = websocket_manager
 
     # ------------------------------------------------------------------ #
     # TaskStore wiring
@@ -101,7 +106,8 @@ class DispatchManager:
         exclude_worker_id: Optional[str] = None,
     ) -> None:
         """Put a task into the pool and immediately trigger a scan."""
-        self._task_store.enqueue_for_dispatch(task_id, task, rec, exclude_worker_id=exclude_worker_id)
+        self._task_store.enqueue_for_dispatch(
+            task_id, task, rec, exclude_worker_id=exclude_worker_id)
         self._task_store.flush_pool()
 
     def _next_retry_timestamp(self, rec: TaskRecord) -> str:
@@ -117,7 +123,8 @@ class DispatchManager:
 
         # Add small symmetric jitter to reduce synchronized requeues.
         if REQUEUE_JITTER_FRAC > 0:
-            jitter = 1.0 + random.uniform(-REQUEUE_JITTER_FRAC, REQUEUE_JITTER_FRAC)
+            jitter = 1.0 + \
+                random.uniform(-REQUEUE_JITTER_FRAC, REQUEUE_JITTER_FRAC)
             delay = max(0.0, delay * jitter)
 
         eta = datetime.now(timezone.utc) + timedelta(seconds=delay)
@@ -137,12 +144,14 @@ class DispatchManager:
         Optionally exclude a worker (e.g., the one that just failed or had no subscribers).
         """
         if not rec:
-            self._logger.warning("Cannot requeue %s: missing task record (%s)", task_id, reason)
+            self._logger.warning(
+                "Cannot requeue %s: missing task record (%s)", task_id, reason)
             return
 
         payload = task or self._task_store.get_parsed(task_id) or rec.parsed
         if not payload:
-            self._logger.warning("Cannot requeue %s: missing task payload (%s)", task_id, reason)
+            self._logger.warning(
+                "Cannot requeue %s: missing task payload (%s)", task_id, reason)
             return
 
         self._logger.info("Requeueing %s: %s", task_id, reason)
@@ -150,7 +159,8 @@ class DispatchManager:
             rec.status = TaskStatus.PENDING
             rec.assigned_worker = None
             rec.error = reason
-            rec.retries = int(getattr(rec, "retries", 0) or 0) + 1  # increment attempt counter
+            # increment attempt counter
+            rec.retries = int(getattr(rec, "retries", 0) or 0) + 1
             rec.next_retry_at = self._next_retry_timestamp(rec)
             if exclude_worker_id:
                 rec.last_failed_worker = exclude_worker_id
@@ -159,7 +169,8 @@ class DispatchManager:
             rec.dispatched_ts = None
             rec.finished_ts = None
 
-        self.enqueue_for_dispatch(task_id, payload, rec, exclude_worker_id=exclude_worker_id)
+        self.enqueue_for_dispatch(
+            task_id, payload, rec, exclude_worker_id=exclude_worker_id)
 
     # ------------------------------------------------------------------ #
     # Dispatch (single or sharded)
@@ -199,10 +210,12 @@ class DispatchManager:
 
         # Stable prefer-ordering: keep others relative order intact.
         if preferred_worker_id:
-            pool = sorted(pool, key=lambda w: (0 if w.worker_id == preferred_worker_id else 1, w.worker_id))
+            pool = sorted(pool, key=lambda w: (0 if w.worker_id ==
+                          preferred_worker_id else 1, w.worker_id))
 
         if not pool:
-            self._logger.info("No suitable IDLE worker for %s; deferring via task pool", task_id)
+            self._logger.info(
+                "No suitable IDLE worker for %s; deferring via task pool", task_id)
             self.requeue_task(
                 task_id,
                 rec,
@@ -223,7 +236,8 @@ class DispatchManager:
             task_load=task_load,
         )
         if not worker_list:
-            self._logger.info("Worker selection failed for %s; deferring via task pool", task_id)
+            self._logger.info(
+                "Worker selection failed for %s; deferring via task pool", task_id)
             self.requeue_task(
                 task_id,
                 rec,
@@ -280,7 +294,8 @@ class DispatchManager:
                 rec.dispatched_ts = time.time()
 
         except Exception as exc:
-            self._logger.warning("Publish failed for %s; requeueing via task pool", task_id)
+            self._logger.warning(
+                "Publish failed for %s; requeueing via task pool", task_id)
             self.requeue_task(
                 task_id,
                 rec,
@@ -290,10 +305,57 @@ class DispatchManager:
             )
 
     def _publish_task(self, topic: str, message: Dict[str, Any]) -> int:
-        """Publish the task to Redis topic and return the subscriber count."""
+        """Publish the task to Redis topic or WebSocket and return the receiver count.
+
+        If the worker is connected via WebSocket, use that connection instead of Redis.
+        This allows workers to optionally bypass Redis Pub/Sub for task delivery.
+
+        Returns:
+            Number of receivers (1 if WebSocket sent, or Redis subscriber count)
+        """
+        worker_id = message.get("assigned_worker")
+
+        # Try WebSocket first if manager is available and worker is connected
+        if self._websocket_manager and worker_id:
+            if self._websocket_manager.is_worker_connected(worker_id):
+                import asyncio
+                try:
+                    # Run async send in sync context
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # We're in async context, create task
+                        asyncio.create_task(
+                            self._websocket_manager.send_task_to_worker(
+                                worker_id, message)
+                        )
+                    else:
+                        # Sync context, run directly
+                        success = asyncio.run(
+                            self._websocket_manager.send_task_to_worker(
+                                worker_id, message)
+                        )
+                        if success:
+                            self._logger.info(
+                                "Sent task %s to worker %s via WebSocket",
+                                message.get("task_id"), worker_id
+                            )
+                            return 1
+                        else:
+                            self._logger.warning(
+                                "WebSocket delivery failed for worker %s, falling back to Redis",
+                                worker_id
+                            )
+                except Exception as exc:
+                    self._logger.warning(
+                        "WebSocket error for worker %s: %s, falling back to Redis",
+                        worker_id, exc
+                    )
+
+        # Fall back to Redis Pub/Sub
         payload = json.dumps(message, ensure_ascii=False)
         receivers = self._redis.publish(topic, payload)
-        self._logger.info("Published to topic=%s receivers=%d", topic, receivers)
+        self._logger.info(
+            "Published to topic=%s receivers=%d", topic, receivers)
         return int(receivers or 0)
 
     def _try_dispatch_sharded(
@@ -311,7 +373,8 @@ class DispatchManager:
             return False
 
         queued = estimate_queue_length(self._task_store)
-        pool = idle_satisfying_pool(self._redis, base_task, exclude_ids=exclude_ids)
+        pool = idle_satisfying_pool(
+            self._redis, base_task, exclude_ids=exclude_ids)
         if not pool:
             return False
 
@@ -380,7 +443,8 @@ class DispatchManager:
                     topic=topic,
                     parent_task_id=parent_task_id,
                     shard_index=idx,
-                    shard_total=len(child_msgs),  # keep consistent with message
+                    # keep consistent with message
+                    shard_total=len(child_msgs),
                     max_retries=parent_rec.max_retries,
                     load=parent_rec.load,
                     slo_seconds=parent_rec.slo_seconds,
@@ -397,7 +461,8 @@ class DispatchManager:
                 order_map[child_id] = idx
 
             except Exception as exc:
-                self._logger.exception("Shard publish failed for %s: %s", child_id, exc)
+                self._logger.exception(
+                    "Shard publish failed for %s: %s", child_id, exc)
                 with self._tasks_lock:
                     self._tasks[child_id] = TaskRecord(
                         task_id=child_id,
