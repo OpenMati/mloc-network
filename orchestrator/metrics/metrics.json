@@ -1,5 +1,5 @@
 {
-  "last_updated": "2025-10-17T09:30:41.202319+00:00",
+  "last_updated": "2025-10-17T10:02:11.573993+00:00",
   "counters": {
     "tasks_submitted": 9,
     "tasks_succeeded": 9,
@@ -7,7 +7,7 @@
     "tasks_requeued": 0,
     "workers_registered": 1,
     "workers_unregistered": 0,
-    "worker_heartbeats": 94
+    "worker_heartbeats": 155
   },
   "active_workers": [
     "my-ws-worker"
@@ -82,8 +82,8 @@
       "my-ws-worker": {
         "status": "active",
         "cost_per_hour": 1.0,
-        "uptime_sec": 380.8110418319702,
-        "accrued_cost_usd": 0.10578084495332506,
+        "uptime_sec": 2271.183352947235,
+        "accrued_cost_usd": 0.6308842647075653,
         "avg_cpu_watts": null,
         "avg_gpu_watts": null,
         "per_gpu_avg_watts": {},
@@ -94,7 +94,7 @@
       }
     },
     "totals": {
-      "accrued_cost_usd": 0.10578084495332506,
+      "accrued_cost_usd": 0.6308842647075653,
       "worker_count": 1
     }
   },

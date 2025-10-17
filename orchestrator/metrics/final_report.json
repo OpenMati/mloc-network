@@ -1,24 +1,26 @@
 {
-  "last_updated": "2025-10-17T09:03:55.579505+00:00",
+  "last_updated": "2025-10-17T10:02:25.206397+00:00",
   "counters": {
-    "tasks_submitted": 3,
-    "tasks_succeeded": 1,
+    "tasks_submitted": 9,
+    "tasks_succeeded": 9,
     "tasks_failed": 0,
     "tasks_requeued": 0,
-    "workers_registered": 0,
+    "workers_registered": 1,
     "workers_unregistered": 0,
-    "worker_heartbeats": 7
+    "worker_heartbeats": 155
   },
-  "active_workers": [],
-  "active_workers_count": 0,
+  "active_workers": [
+    "my-ws-worker"
+  ],
+  "active_workers_count": 1,
   "task_timings": {
     "overall": {
-      "queue_avg_sec": 0.0025739669799804688,
-      "queue_samples": 1,
-      "execution_avg_sec": 0.0011870861053466797,
-      "execution_samples": 1,
-      "total_avg_sec": 0.0037620067596435547,
-      "total_samples": 1
+      "queue_avg_sec": 10.141804032855564,
+      "queue_samples": 9,
+      "execution_avg_sec": 0.002081102795071072,
+      "execution_samples": 9,
+      "total_avg_sec": 10.1438856654697,
+      "total_samples": 9
     },
     "inference": {
       "queue_avg_sec": null,
@@ -37,12 +39,12 @@
       "total_samples": 0
     },
     "other": {
-      "queue_avg_sec": 0.0025739669799804688,
-      "queue_samples": 1,
-      "execution_avg_sec": 0.0011870861053466797,
-      "execution_samples": 1,
-      "total_avg_sec": 0.0037620067596435547,
-      "total_samples": 1
+      "queue_avg_sec": 10.141804032855564,
+      "queue_samples": 9,
+      "execution_avg_sec": 0.002081102795071072,
+      "execution_samples": 9,
+      "total_avg_sec": 10.1438856654697,
+      "total_samples": 9
     }
   },
   "slo": {
@@ -50,7 +52,7 @@
       "with_slo": 0,
       "met": 0,
       "breached": 0,
-      "missing": 1,
+      "missing": 9,
       "completion_rate": null
     },
     "inference": {
@@ -71,17 +73,17 @@
       "with_slo": 0,
       "met": 0,
       "breached": 0,
-      "missing": 1,
+      "missing": 9,
       "completion_rate": null
     }
   },
   "workers": {
     "entries": {
       "my-ws-worker": {
-        "status": "offline",
-        "cost_per_hour": null,
-        "uptime_sec": null,
-        "accrued_cost_usd": null,
+        "status": "active",
+        "cost_per_hour": 1.0,
+        "uptime_sec": 2284.815745830536,
+        "accrued_cost_usd": 0.6346710405084822,
         "avg_cpu_watts": null,
         "avg_gpu_watts": null,
         "per_gpu_avg_watts": {},
@@ -92,10 +94,10 @@
       }
     },
     "totals": {
-      "accrued_cost_usd": 0.0,
+      "accrued_cost_usd": 0.6346710405084822,
       "worker_count": 1
     }
   },
-  "completed_tasks": 1,
-  "finalized_at": "2025-10-17T09:03:55.579538+00:00"
+  "completed_tasks": 9,
+  "finalized_at": "2025-10-17T10:02:25.206458+00:00"
 }

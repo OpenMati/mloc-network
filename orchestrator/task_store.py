@@ -53,21 +53,25 @@ class DispatchPlan:
 
 
 # -----------------------------
-# In-memory pool with SLO gating
+# Redis-backed pool with SLO gating
 # -----------------------------
 
 class TaskPool:
     """
-    A small in-memory pool. Entries are drained when either:
+    A Redis-backed task pool. Entries are drained when either:
       - the pool size reaches batch_size, or
       - any entry's SLO progress crosses the configured threshold.
     """
 
-    def __init__(self, batch_size: int, slo_fraction: float) -> None:
+    def __init__(self, batch_size: int, slo_fraction: float, redis_client=None) -> None:
         self._batch_size = max(1, int(batch_size))
         self._slo_fraction = max(0.0, float(slo_fraction))
-        self._entries: Dict[str, PoolEntry] = {}
+        self._redis = redis_client
         self._lock: Optional[threading.RLock] = None
+
+        # Redis keys
+        self._pool_key = "taskpool:entries"
+        self._pool_metadata_prefix = "taskpool:meta:"
 
     @property
     def _thread_lock(self) -> threading.RLock:
@@ -75,10 +79,82 @@ class TaskPool:
             self._lock = threading.RLock()
         return self._lock
 
+    def _serialize_entry(self, entry: PoolEntry) -> str:
+        """Serialize PoolEntry to JSON string for Redis storage."""
+        return json.dumps({
+            "task_id": entry.task_id,
+            "task": entry.task,
+            "exclude_worker_id": entry.exclude_worker_id,
+            "enqueued_at": entry.enqueued_at,
+            # Store record attributes we need
+            "record_data": {
+                "slo_seconds": getattr(entry.record, "slo_seconds", None),
+                "submitted_ts": getattr(entry.record, "submitted_ts", None),
+                "load": getattr(entry.record, "load", None),
+            }
+        }, default=str)
+
+    def _deserialize_entry(self, data: str, record: Any) -> PoolEntry:
+        """Deserialize JSON string back to PoolEntry."""
+        obj = json.loads(data)
+        return PoolEntry(
+            task_id=obj["task_id"],
+            task=obj["task"],
+            record=record,
+            exclude_worker_id=obj.get("exclude_worker_id"),
+            enqueued_at=obj.get("enqueued_at", time.time())
+        )
+
+    def _get_all_entries(self) -> Dict[str, PoolEntry]:
+        """Retrieve all entries from Redis."""
+        if not self._redis:
+            return {}
+
+        entries: Dict[str, PoolEntry] = {}
+        try:
+            # Get all task_ids from the Redis set
+            task_ids = self._redis.smembers(self._pool_key)
+            if not task_ids:
+                return {}
+
+            # Retrieve metadata for each task
+            for task_id in task_ids:
+                meta_key = f"{self._pool_metadata_prefix}{task_id}"
+                data = self._redis.get(meta_key)
+                if data:
+                    # Create a minimal record object for deserialization
+                    obj = json.loads(data)
+                    record_data = obj.get("record_data", {})
+
+                    class MinimalRecord:
+                        def __init__(self, data):
+                            self.slo_seconds = data.get("slo_seconds")
+                            self.submitted_ts = data.get("submitted_ts")
+                            self.load = data.get("load")
+
+                    record = MinimalRecord(record_data)
+                    entry = self._deserialize_entry(data, record)
+                    entries[task_id] = entry
+        except Exception as e:
+            # Fallback to empty dict on error
+            pass
+
+        return entries
+
     def add(self, entry: PoolEntry) -> List[PoolEntry]:
         """Add an entry and return a batch to dispatch if threshold met."""
         with self._thread_lock:
-            self._entries[entry.task_id] = entry
+            # Store in Redis
+            if self._redis:
+                try:
+                    # Add task_id to the set
+                    self._redis.sadd(self._pool_key, entry.task_id)
+                    # Store entry metadata
+                    meta_key = f"{self._pool_metadata_prefix}{entry.task_id}"
+                    self._redis.set(meta_key, self._serialize_entry(entry))
+                except Exception:
+                    pass  # Continue even if Redis fails
+
             return self._flush_if_needed_locked()
 
     def requeue(self, entries: List[PoolEntry]) -> None:
@@ -86,8 +162,14 @@ class TaskPool:
         if not entries:
             return
         with self._thread_lock:
-            for entry in entries:
-                self._entries[entry.task_id] = entry
+            if self._redis:
+                try:
+                    for entry in entries:
+                        self._redis.sadd(self._pool_key, entry.task_id)
+                        meta_key = f"{self._pool_metadata_prefix}{entry.task_id}"
+                        self._redis.set(meta_key, self._serialize_entry(entry))
+                except Exception:
+                    pass
 
     def pop_due(self) -> List[PoolEntry]:
         """
@@ -95,21 +177,33 @@ class TaskPool:
         Returns at most batch_size entries to avoid burst dispatch.
         """
         with self._thread_lock:
-            if not self._entries:
+            entries = self._get_all_entries()
+            if not entries:
                 return []
             now = time.time()
-            if any(e.slo_progress(now) >= self._slo_fraction for e in self._entries.values()):
-                return self._take_n_locked(self._batch_size)
+            if any(e.slo_progress(now) >= self._slo_fraction for e in entries.values()):
+                return self._take_n_locked(self._batch_size, entries)
             return []
 
     def clear_task(self, task_id: str) -> None:
         """Remove a single task from the pool (e.g., after dispatch or cancel)."""
         with self._thread_lock:
-            self._entries.pop(task_id, None)
+            if self._redis:
+                try:
+                    self._redis.srem(self._pool_key, task_id)
+                    meta_key = f"{self._pool_metadata_prefix}{task_id}"
+                    self._redis.delete(meta_key)
+                except Exception:
+                    pass
 
     def has_entries(self) -> bool:
         with self._thread_lock:
-            return bool(self._entries)
+            if self._redis:
+                try:
+                    return self._redis.scard(self._pool_key) > 0
+                except Exception:
+                    return False
+            return False
 
     def pop_all_pending(self) -> List[PoolEntry]:
         """
@@ -117,30 +211,36 @@ class TaskPool:
         Used when workers become idle to immediately dispatch waiting tasks.
         """
         with self._thread_lock:
-            if not self._entries:
+            entries = self._get_all_entries()
+            if not entries:
                 return []
-            return self._take_n_locked(len(self._entries))
+            return self._take_n_locked(len(entries), entries)
 
     # -------- internals --------
 
     def _flush_if_needed_locked(self) -> List[PoolEntry]:
         """Return a batch if pool-size or SLO threshold is met."""
-        if len(self._entries) >= self._batch_size:
-            return self._take_n_locked(self._batch_size)
+        entries = self._get_all_entries()
+
+        if len(entries) >= self._batch_size:
+            return self._take_n_locked(self._batch_size, entries)
 
         now = time.time()
-        if any(e.slo_progress(now) >= self._slo_fraction for e in self._entries.values()):
-            return self._take_n_locked(self._batch_size)
+        if any(e.slo_progress(now) >= self._slo_fraction for e in entries.values()):
+            return self._take_n_locked(self._batch_size, entries)
 
         return []
 
-    def _take_n_locked(self, n: int) -> List[PoolEntry]:
+    def _take_n_locked(self, n: int, entries: Dict[str, PoolEntry] = None) -> List[PoolEntry]:
         """
         Take at most n entries out of the pool, ordering by:
           1) higher SLO progress first,
           2) earlier submitted_ts next (FIFO within same progress).
         """
-        items = list(self._entries.values())
+        if entries is None:
+            entries = self._get_all_entries()
+
+        items = list(entries.values())
         # Rank by urgency then FIFO; this improves fairness under pressure.
         now = time.time()
         items.sort(
@@ -149,8 +249,17 @@ class TaskPool:
             reverse=True,
         )
         batch = items[:n]
-        for b in batch:
-            self._entries.pop(b.task_id, None)
+
+        # Remove from Redis
+        if self._redis:
+            try:
+                for b in batch:
+                    self._redis.srem(self._pool_key, b.task_id)
+                    meta_key = f"{self._pool_metadata_prefix}{b.task_id}"
+                    self._redis.delete(meta_key)
+            except Exception:
+                pass
+
         return batch
 
     def time_until_threshold(self, slo_fraction: float) -> Optional[float]:
@@ -159,11 +268,12 @@ class TaskPool:
         0.0 is returned if at least one entry already meets/exceeds the fraction.
         """
         with self._thread_lock:
-            if not self._entries:
+            entries = self._get_all_entries()
+            if not entries:
                 return None
             now = time.time()
             min_delay: Optional[float] = None
-            for entry in self._entries.values():
+            for entry in entries.values():
                 slo = getattr(entry.record, "slo_seconds", None)
                 if not slo or slo <= 0:
                     continue
@@ -205,7 +315,7 @@ class TaskPoolManager:
         pending_status: str,
         done_status: str,
     ) -> None:
-        self._pool = TaskPool(batch_size, slo_fraction)
+        self._pool = TaskPool(batch_size, slo_fraction, redis_client)
         self._dispatch_fn = dispatch_fn
         self._logger = logger
         self._rds = redis_client
