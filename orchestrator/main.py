@@ -93,7 +93,7 @@ async def require_auth(request: Request):
 # -------------------------
 # Models
 # -------------------------
-TASK_POOL_BATCH_SIZE = parse_int_env("TASK_POOL_BATCH_SIZE", 5)
+TASK_POOL_BATCH_SIZE = parse_int_env("TASK_POOL_BATCH_SIZE", 1)
 TASK_SLO_DISPATCH_THRESHOLD = max(
     0.0, min(1.0, parse_float_env("TASK_SLO_THRESHOLD", 0.5)))
 
@@ -221,107 +221,95 @@ async def get_metrics(_: Any = Depends(require_auth)):
 @app.get("/workers")
 async def list_workers(_: Any = Depends(require_auth)):
     """List all workers from both Redis and WebSocket connections."""
-    # Get workers from Redis
-    redis_workers = list_workers_from_redis(rds)
-
-    # Get WebSocket connection stats
-    ws_stats = WEBSOCKET_MANAGER.get_connection_stats()
-    ws_worker_ids = set(ws_stats.get("workers", {}).keys())
-
-    # Merge the information
-    all_workers = []
-    seen_worker_ids = set()
-
-    # Add Redis workers with WebSocket status
-    for worker in redis_workers:
-        worker_id = worker.get("worker_id")
-        seen_worker_ids.add(worker_id)
-        worker_dict = dict(worker)
-
-        # Add WebSocket connection info if available
-        if worker_id in ws_worker_ids:
-            ws_info = ws_stats["workers"][worker_id]
-            worker_dict["transport"] = "redis+websocket"
-            worker_dict["websocket"] = {
-                "connected": True,
-                "connected_at": ws_info["connected_at"],
-                "last_seen": ws_info["last_seen"],
-                "tasks_sent": ws_info["tasks_sent"],
-                "events_received": ws_info["events_received"],
-                "connected_seconds": ws_info["connected_seconds"],
-            }
-        else:
-            worker_dict["transport"] = "redis"
-            worker_dict["websocket"] = {"connected": False}
-
-        all_workers.append(worker_dict)
-
-    # Add WebSocket-only workers (not in Redis)
-    for worker_id in ws_worker_ids:
-        if worker_id not in seen_worker_ids:
-            ws_info = ws_stats["workers"][worker_id]
-            all_workers.append({
-                "worker_id": worker_id,
-                "status": "CONNECTED",
-                "transport": "websocket",
-                "websocket": {
-                    "connected": True,
-                    "connected_at": ws_info["connected_at"],
-                    "last_seen": ws_info["last_seen"],
-                    "tasks_sent": ws_info["tasks_sent"],
-                    "events_received": ws_info["events_received"],
-                    "connected_seconds": ws_info["connected_seconds"],
-                },
-            })
-
-    return {
-        "total": len(all_workers),
-        "redis_only": sum(1 for w in all_workers if w.get("transport") == "redis"),
-        "websocket_only": sum(1 for w in all_workers if w.get("transport") == "websocket"),
-        "both": sum(1 for w in all_workers if w.get("transport") == "redis+websocket"),
-        "workers": all_workers,
-    }
+    return list_workers_from_redis(rds)
 
 
 @app.get("/workers/{worker_id}")
 async def get_worker(worker_id: str, _: Any = Depends(require_auth)):
     """Get detailed information about a specific worker."""
     w = get_worker_from_redis(rds, worker_id)
-    ws_connected = WEBSOCKET_MANAGER.is_worker_connected(worker_id)
-
-    if not w and not ws_connected:
+    if not w:
         raise HTTPException(status_code=404, detail="worker not found")
+    stale = is_stale_by_redis(rds, worker_id)
+    return {**w.model_dump(), "stale": stale}
 
-    result = {}
+# -------------------------
+# WebSocket Worker Registration Helpers
+# -------------------------
 
-    # Add Redis information if available
-    if w:
-        stale = is_stale_by_redis(rds, worker_id)
-        result = {**w.model_dump(), "stale": stale}
-        result["transport"] = "redis+websocket" if ws_connected else "redis"
-    else:
-        result = {
-            "worker_id": worker_id,
-            "status": "CONNECTED",
-            "transport": "websocket",
-        }
 
-    # Add WebSocket information if connected
-    if ws_connected:
-        ws_stats = WEBSOCKET_MANAGER.get_connection_stats()
-        ws_info = ws_stats["workers"].get(worker_id, {})
-        result["websocket"] = {
-            "connected": True,
-            "connected_at": ws_info.get("connected_at"),
-            "last_seen": ws_info.get("last_seen"),
-            "tasks_sent": ws_info.get("tasks_sent", 0),
-            "events_received": ws_info.get("events_received", 0),
-            "connected_seconds": ws_info.get("connected_seconds", 0),
-        }
-    else:
-        result["websocket"] = {"connected": False}
+def _register_websocket_worker(event: WorkerEvent) -> None:
+    """Register a WebSocket worker to Redis so scheduler can find it."""
+    from worker_cls import WORKERS_SET, r_worker_key, r_hb_key
 
-    return result
+    worker_id = event.worker_id
+    payload = event.payload or {}
+
+    # Extract worker info from event payload
+    env = payload.get("env", {})
+    hardware = payload.get("hardware", {})
+    cost_per_hour = payload.get("cost_per_hour", 0.0)
+    tags = event.tags or []
+
+    data = {
+        "worker_id": worker_id,
+        "status": event.status or "IDLE",
+        "started_at": event.ts or now_iso(),
+        "pid": str(payload.get("pid", 0)),
+        "env_json": json.dumps(env, ensure_ascii=False),
+        "hardware_json": json.dumps(hardware, ensure_ascii=False),
+        "tags_json": json.dumps(tags, ensure_ascii=False),
+        "last_seen": event.ts or now_iso(),
+        "cost_per_hour": str(cost_per_hour),
+    }
+
+    with rds.pipeline() as p:
+        p.sadd(WORKERS_SET, worker_id)
+        p.hset(r_worker_key(worker_id), mapping=data)
+        p.setex(r_hb_key(worker_id), 120, event.ts or now_iso())
+        p.execute()
+
+    logger.info(
+        "Registered WebSocket worker %s to Redis (tags: %s)", worker_id, tags)
+
+
+def _update_websocket_worker_heartbeat(event: WorkerEvent) -> None:
+    """Update WebSocket worker heartbeat in Redis."""
+    from worker_cls import r_worker_key, r_hb_key
+
+    worker_id = event.worker_id
+    ts = event.ts or now_iso()
+
+    with rds.pipeline() as p:
+        p.setex(r_hb_key(worker_id), 120, ts)
+        p.hset(r_worker_key(worker_id), mapping={"last_seen": ts})
+        p.execute()
+
+
+def _update_websocket_worker_status(event: WorkerEvent) -> None:
+    """Update WebSocket worker status in Redis."""
+    from worker_cls import r_worker_key
+
+    worker_id = event.worker_id
+    ts = event.ts or now_iso()
+    status = event.status or "IDLE"
+
+    mapping = {"status": status, "last_seen": ts}
+    payload = event.payload or {}
+    if payload:
+        mapping.update({f"extra_{k}": str(v) for k, v in payload.items()})
+
+    rds.hset(r_worker_key(worker_id), mapping=mapping)
+
+
+def _unregister_websocket_worker(event: WorkerEvent) -> None:
+    """Unregister a WebSocket worker from Redis."""
+    from worker_cls import WORKERS_SET, r_worker_key, r_hb_key, unregister_worker
+
+    worker_id = event.worker_id
+    unregister_worker(rds, worker_id)
+    logger.info("Unregistered WebSocket worker %s from Redis", worker_id)
+
 
 # -------------------------
 # WebSocket endpoint for worker connections
@@ -343,6 +331,8 @@ async def websocket_worker_endpoint(websocket: WebSocket, worker_id: str):
     async def handle_worker_event(event_data: Dict[str, Any]):
         """Process events received from worker via WebSocket."""
         try:
+            logger.info("Received WebSocket event from worker %s: type=%s",
+                        worker_id, event_data.get("type"))
             # Parse and handle the event similar to Redis events
             event = parse_event(event_data)
 
@@ -350,8 +340,18 @@ async def websocket_worker_endpoint(websocket: WebSocket, worker_id: str):
                 log_worker_event(logger, event)
                 METRICS_RECORDER.record_worker_event(event)
 
+                # Handle worker registration - register to Redis for scheduler
+                if event.type == "REGISTER":
+                    _register_websocket_worker(event)
+                # Handle worker heartbeat - update last_seen in Redis
+                elif event.type == "HEARTBEAT":
+                    _update_websocket_worker_heartbeat(event)
+                # Handle worker status update
+                elif event.type == "STATUS":
+                    _update_websocket_worker_status(event)
                 # Handle worker unregister
-                if event.type == "UNREGISTER":
+                elif event.type == "UNREGISTER":
+                    _unregister_websocket_worker(event)
                     _reschedule_tasks_for_worker(event.worker_id)
 
             elif isinstance(event, TaskEvent):
@@ -595,7 +595,8 @@ def _handle_task_event_sync(event: TaskEvent) -> None:
                         if parent_rec:
                             parent_rec.status = TaskStatus.DONE
                             parent_rec.error = None
-        TASK_STORE.flush_pool()
+        # Flush all pending tasks when worker becomes idle
+        TASK_STORE.flush_pool_all()
         if state_dirty:
             _state_mark_dirty()
         return
@@ -692,7 +693,8 @@ def _handle_task_event_sync(event: TaskEvent) -> None:
                 task_id, rec, worker_id, err_msg, parent_id=parent_id)
             state_dirty = True
         METRICS_RECORDER.finalize_task_failure(task_id)
-        TASK_STORE.flush_pool()
+        # Flush all pending tasks when worker becomes idle after failure
+        TASK_STORE.flush_pool_all()
         if state_dirty:
             _state_mark_dirty()
         return

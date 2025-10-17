@@ -293,21 +293,61 @@ class WebSocketTransport(WorkerTransport):
         super().__init__(worker_id)
         self.ws_client = websocket_client
         self._cached_state: Dict[str, Any] = {}
+        self._cached_events: List[Dict[str, Any]] = []
+        # Use a queue and dedicated thread to avoid asyncio.run() conflicts
+        import queue
+        import threading
+        self._event_queue: queue.Queue = queue.Queue()
+        self._stop_sender = threading.Event()
+        self._send_thread: Optional[threading.Thread] = None
+        self._start_sender_thread()
+
+    def _start_sender_thread(self):
+        """Start a background thread with its own event loop to send queued events."""
+        import threading
+        if self._send_thread and self._send_thread.is_alive():
+            return
+
+        def sender_loop():
+            import asyncio
+            import time
+            # Create a dedicated event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            try:
+                while not self._stop_sender.is_set():
+                    try:
+                        # Get event with timeout to allow checking stop signal
+                        event = self._event_queue.get(timeout=0.1)
+                        # Send event asynchronously
+                        if self.ws_client and self.ws_client.is_connected:
+                            try:
+                                loop.run_until_complete(
+                                    self.ws_client.send_event(event))
+                            except Exception:
+                                # If send fails, put back in queue for retry
+                                self._event_queue.put(event)
+                                time.sleep(0.5)
+                    except:  # queue.Empty or other exceptions
+                        continue
+            finally:
+                loop.close()
+
+        self._send_thread = threading.Thread(
+            target=sender_loop, daemon=True, name="ws-event-sender")
+        self._send_thread.start()
 
     def _send_event_sync(self, event: Dict[str, Any]) -> None:
-        """Send event via WebSocket (synchronous wrapper)."""
-        import asyncio
-
+        """Send event via WebSocket using dedicated sender thread."""
         try:
-            # Try to send via WebSocket
-            if self.ws_client and self.ws_client.is_connected:
-                asyncio.run(self.ws_client.send_event(event))
-            else:
-                # Cache event if not connected (will be sent on reconnect)
-                pass
+            # Queue the event for immediate sending by background thread
+            # This returns immediately without blocking
+            self._event_queue.put(event, block=False)
         except Exception:
-            # Silently fail - WebSocket transport is best-effort
-            pass
+            # If queue is full or other error, cache the event
+            if event not in self._cached_events:
+                self._cached_events.append(event)
 
     def register(
         self,

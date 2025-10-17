@@ -37,7 +37,8 @@ class PoolEntry:
         slo = getattr(self.record, "slo_seconds", None)
         if not slo or slo <= 0:
             return 0.0
-        submitted_ts = getattr(self.record, "submitted_ts", None) or self.enqueued_at
+        submitted_ts = getattr(
+            self.record, "submitted_ts", None) or self.enqueued_at
         elapsed = max(0.0, (now or time.time()) - submitted_ts)
         return 0.0 if slo <= 0 else elapsed / slo
 
@@ -110,6 +111,16 @@ class TaskPool:
         with self._thread_lock:
             return bool(self._entries)
 
+    def pop_all_pending(self) -> List[PoolEntry]:
+        """
+        Pop ALL pending entries from the pool, regardless of SLO.
+        Used when workers become idle to immediately dispatch waiting tasks.
+        """
+        with self._thread_lock:
+            if not self._entries:
+                return []
+            return self._take_n_locked(len(self._entries))
+
     # -------- internals --------
 
     def _flush_if_needed_locked(self) -> List[PoolEntry]:
@@ -133,7 +144,8 @@ class TaskPool:
         # Rank by urgency then FIFO; this improves fairness under pressure.
         now = time.time()
         items.sort(
-            key=lambda e: (e.slo_progress(now), -(getattr(e.record, "submitted_ts", e.enqueued_at))),
+            key=lambda e: (e.slo_progress(now), -
+                           (getattr(e.record, "submitted_ts", e.enqueued_at))),
             reverse=True,
         )
         batch = items[:n]
@@ -204,15 +216,18 @@ class TaskPoolManager:
         self._pending_status = pending_status
         self._done_status = done_status
 
-        self._model_worker_cache: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
+        self._model_worker_cache: "OrderedDict[str, Tuple[str, float]]" = OrderedDict(
+        )
         self._model_queue_counts: Counter[str] = Counter()
         self._model_queue_lock = threading.RLock()
 
         self._flush_lock = threading.RLock()
         self._flush_timer: Optional[threading.Timer] = None
         self._slo_fraction = float(slo_fraction)
-        self._stickiness_ttl = max(0.0, float(os.getenv("MODEL_STICKINESS_TTL_SEC", "180")))
-        self._stickiness_capacity = max(1, int(os.getenv("MODEL_STICKINESS_MAX_ENTRIES", "256")))
+        self._stickiness_ttl = max(0.0, float(
+            os.getenv("MODEL_STICKINESS_TTL_SEC", "180")))
+        self._stickiness_capacity = max(
+            1, int(os.getenv("MODEL_STICKINESS_MAX_ENTRIES", "256")))
 
     # ---- public API ----
 
@@ -224,7 +239,8 @@ class TaskPoolManager:
         *,
         exclude_worker_id: Optional[str] = None,
     ) -> None:
-        entry = PoolEntry(task_id=task_id, task=task, record=record, exclude_worker_id=exclude_worker_id)
+        entry = PoolEntry(task_id=task_id, task=task,
+                          record=record, exclude_worker_id=exclude_worker_id)
         self._update_model_queue_counts([entry], delta=1)
         batch = self._pool.add(entry)
         if batch:
@@ -241,6 +257,21 @@ class TaskPoolManager:
             self._dispatch_batch(batch)
         else:
             self._ensure_flush_timer()
+
+    def flush_all_pending(self) -> None:
+        """
+        Force flush ALL pending tasks from the pool, regardless of SLO.
+        Called when workers become idle to immediately dispatch waiting tasks.
+        """
+        with self._flush_lock:
+            self._flush_timer = None
+
+        batch = self._pool.pop_all_pending()
+        if batch:
+            self._logger.info(
+                "Flushing %d pending tasks due to worker availability", len(batch))
+            self._dispatch_batch(batch)
+        self._ensure_flush_timer()
 
     def clear_task(self, task_id: str) -> None:
         self._pool.clear_task(task_id)
@@ -314,7 +345,8 @@ class TaskPoolManager:
                     plan.preferred_worker_id,
                 )
             except Exception as exc:  # pragma: no cover
-                self._logger.warning("Dispatch planning failed for %s: %s", plan.task_id, exc)
+                self._logger.warning(
+                    "Dispatch planning failed for %s: %s", plan.task_id, exc)
 
         self._ensure_flush_timer()
 
@@ -347,7 +379,8 @@ class TaskPoolManager:
         if not inference_entries:
             return plans, inference_entries
 
-        plan_map: Dict[str, DispatchPlan] = {plan.task_id: plan for plan in plans}
+        plan_map: Dict[str, DispatchPlan] = {
+            plan.task_id: plan for plan in plans}
         skip_ids: Set[str] = set()
         pending: Dict[str, PoolEntry] = {}
 
@@ -355,7 +388,8 @@ class TaskPoolManager:
             if entry.task_id in skip_ids:
                 continue
             plan = plan_map.get(entry.task_id)
-            signature = self._merge_signature(plan.parsed if plan else entry.task)
+            signature = self._merge_signature(
+                plan.parsed if plan else entry.task)
             if not signature:
                 continue
             partner = pending.get(signature)
@@ -373,8 +407,10 @@ class TaskPoolManager:
             plan_map.pop(sid, None)
             pool_map.pop(sid, None)
 
-        filtered_plans = [plan for plan in plans if plan.task_id not in skip_ids]
-        remaining_entries = [entry for entry in inference_entries if entry.task_id not in skip_ids]
+        filtered_plans = [
+            plan for plan in plans if plan.task_id not in skip_ids]
+        remaining_entries = [
+            entry for entry in inference_entries if entry.task_id not in skip_ids]
         return filtered_plans, remaining_entries
 
     def _merge_signature(self, task: Dict[str, Any]) -> Optional[str]:
@@ -408,7 +444,8 @@ class TaskPoolManager:
 
         combined_items = list(primary_items) + list(secondary_items)
         combined_spec = copy.deepcopy(primary_plan.parsed)
-        combined_spec.setdefault("spec", {})["data"] = {"type": "list", "items": combined_items}
+        combined_spec.setdefault("spec", {})["data"] = {
+            "type": "list", "items": combined_items}
 
         slices: Dict[str, Tuple[int, int]] = {
             primary_entry.task_id: (0, len(primary_items)),
@@ -451,7 +488,8 @@ class TaskPoolManager:
         try:
             from datasets import load_dataset  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
-            self._logger.warning("Cannot merge dataset-based inference tasks: %s", exc)
+            self._logger.warning(
+                "Cannot merge dataset-based inference tasks: %s", exc)
             return None
 
         name = data.get("name")
@@ -459,7 +497,8 @@ class TaskPoolManager:
         try:
             dataset = load_dataset(source, name=name, split=split)
         except Exception as exc:
-            self._logger.warning("Failed to load dataset %s for merge: %s", source, exc)
+            self._logger.warning(
+                "Failed to load dataset %s for merge: %s", source, exc)
             return None
 
         if data.get("shuffle"):
@@ -469,19 +508,23 @@ class TaskPoolManager:
                 if buffer_size is None:
                     dataset = dataset.shuffle(seed=seed)
                 else:
-                    dataset = dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
+                    dataset = dataset.shuffle(
+                        seed=seed, buffer_size=int(buffer_size))
             except Exception as exc:
-                self._logger.warning("Dataset shuffle failed during merge: %s", exc)
+                self._logger.warning(
+                    "Dataset shuffle failed during merge: %s", exc)
 
         column = data.get("column", "text")
         if column not in dataset.column_names:
-            self._logger.warning("Column %s not found when merging dataset inference tasks", column)
+            self._logger.warning(
+                "Column %s not found when merging dataset inference tasks", column)
             return None
 
         try:
             return [str(value) for value in dataset[column]]
         except Exception as exc:
-            self._logger.warning("Failed to extract dataset column %s for merge: %s", column, exc)
+            self._logger.warning(
+                "Failed to extract dataset column %s for merge: %s", column, exc)
             return None
 
     def _update_merge_state(
@@ -500,7 +543,8 @@ class TaskPoolManager:
                 return False
 
             parent_children = list(parent_rec.merged_children or [])
-            parent_children = [c for c in parent_children if c.get("task_id") != child_id]
+            parent_children = [
+                c for c in parent_children if c.get("task_id") != child_id]
             parent_children.append(
                 {
                     "task_id": child_id,
@@ -548,8 +592,10 @@ class TaskPoolManager:
 
         # 1) Build dispatch plans and cache the eligible worker pools.
         for entry in entries:
-            exclude_ids: Set[str] = {entry.exclude_worker_id} if entry.exclude_worker_id else set()
-            pool = idle_satisfying_pool(self._rds, entry.task, exclude_ids=exclude_ids) or []
+            exclude_ids: Set[str] = {
+                entry.exclude_worker_id} if entry.exclude_worker_id else set()
+            pool = idle_satisfying_pool(
+                self._rds, entry.task, exclude_ids=exclude_ids) or []
             pool_map[entry.task_id] = pool
 
             plans.append(
@@ -564,12 +610,14 @@ class TaskPoolManager:
             if self._is_inference_task(entry.task):
                 inference_entries.append(entry)
 
-        plans, inference_entries = self._apply_inference_merges(plans, pool_map, inference_entries)
+        plans, inference_entries = self._apply_inference_merges(
+            plans, pool_map, inference_entries)
 
         # Keep worker pools that correspond to surviving plans only.
         if plans:
             active_ids = {plan.task_id for plan in plans}
-            pool_map = {task_id: pool_map.get(task_id, []) for task_id in active_ids}
+            pool_map = {task_id: pool_map.get(
+                task_id, []) for task_id in active_ids}
 
         model_counts: Counter[str] = Counter()
         for entry in inference_entries:
@@ -579,17 +627,21 @@ class TaskPoolManager:
         remaining_by_model = Counter(model_counts)
 
         # 2) Co-location when workers are tight: pair tasks sharing common workers
-        available_workers = {w.worker_id for workers in pool_map.values() for w in workers}
+        available_workers = {
+            w.worker_id for workers in pool_map.values() for w in workers}
         worker_shortage = len(available_workers) < len(pool_map)
 
         if worker_shortage and len(inference_entries) >= 2:
-            ordered = sorted(inference_entries, key=lambda e: getattr(e.record, "submitted_ts", 0.0))
+            ordered = sorted(inference_entries, key=lambda e: getattr(
+                e.record, "submitted_ts", 0.0))
             paired: Set[str] = set()
-            candidate_cache: Dict[str, Tuple[List[Worker], Dict[str, Worker]]] = {}
+            candidate_cache: Dict[str,
+                                  Tuple[List[Worker], Dict[str, Worker]]] = {}
             for entry in inference_entries:
                 task_pool = pool_map.get(entry.task_id, [])
                 if task_pool:
-                    candidate_cache[entry.task_id] = (task_pool, {w.worker_id: w for w in task_pool})
+                    candidate_cache[entry.task_id] = (
+                        task_pool, {w.worker_id: w for w in task_pool})
 
             for idx, entry in enumerate(ordered):
                 task_id = entry.task_id
@@ -601,7 +653,7 @@ class TaskPoolManager:
                 workers_a, cand_a = pool_a
                 load_a = getattr(entry.record, "load", 0)
 
-                for other in ordered[idx + 1 :]:
+                for other in ordered[idx + 1:]:
                     other_id = other.task_id
                     if other_id in paired:
                         continue
@@ -880,7 +932,8 @@ class TaskStore:
     ) -> None:
         if not self._pool_manager:
             raise RuntimeError("Task pool manager is not configured")
-        self._pool_manager.enqueue(task_id, task, record, exclude_worker_id=exclude_worker_id)
+        self._pool_manager.enqueue(
+            task_id, task, record, exclude_worker_id=exclude_worker_id)
 
     def clear_from_pool(self, task_id: str) -> None:
         if self._pool_manager:
@@ -897,6 +950,11 @@ class TaskStore:
     def flush_pool(self) -> None:
         if self._pool_manager:
             self._pool_manager.flush_due()
+
+    def flush_pool_all(self) -> None:
+        """Force flush all pending tasks, typically when workers become idle."""
+        if self._pool_manager:
+            self._pool_manager.flush_all_pending()
 
     def update_parsed(self, task_id: str, parsed: Dict[str, Any]) -> None:
         with self._lock:
@@ -1011,7 +1069,8 @@ class TaskStore:
 
     def record_dead_letter(self, entry: Dict[str, Any]) -> None:
         payload = dict(entry)
-        payload.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
+        payload.setdefault("recorded_at", datetime.now(
+            timezone.utc).isoformat())
         with self._lock:
             self._dead_letters.append(payload)
             # Keep the list bounded to avoid unbounded memory growth.
@@ -1055,9 +1114,11 @@ class TaskStore:
         with self._lock:
             self._parsed = copy.deepcopy(state.get("parsed", {}))
             depends = state.get("depends", {})
-            self._depends = {task_id: set(items or []) for task_id, items in depends.items()}
+            self._depends = {task_id: set(items or [])
+                             for task_id, items in depends.items()}
             self._released = set(state.get("released", []))
-            self._load = {tid: int(val) for tid, val in (state.get("load") or {}).items()}
+            self._load = {tid: int(val) for tid, val in (
+                state.get("load") or {}).items()}
             self._slo = copy.deepcopy(state.get("slo", {}))
             self._dead_letters = copy.deepcopy(state.get("dead_letters", []))
 
@@ -1070,7 +1131,8 @@ class TaskStore:
                             nested[child_id] = (int(values[0]), int(values[1]))
                 merge_state[parent_id] = nested
             self._merge_slices = merge_state
-            self._merge_parent = {k: v for k, v in (state.get("merge_parent") or {}).items()}
+            self._merge_parent = {k: v for k, v in (
+                state.get("merge_parent") or {}).items()}
 
     def reset_release(self, task_id: str) -> None:
         """Allow a task to be redispatched by clearing its released flag."""

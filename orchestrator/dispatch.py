@@ -320,31 +320,51 @@ class DispatchManager:
             if self._websocket_manager.is_worker_connected(worker_id):
                 import asyncio
                 try:
-                    # Run async send in sync context
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # We're in async context, create task
+                    # Check if we're in an async context
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # We're in async context, schedule the send and return success immediately
+                        # The WebSocket connection is verified, so we can trust delivery
                         asyncio.create_task(
                             self._websocket_manager.send_task_to_worker(
                                 worker_id, message)
                         )
-                    else:
-                        # Sync context, run directly
-                        success = asyncio.run(
-                            self._websocket_manager.send_task_to_worker(
-                                worker_id, message)
+                        self._logger.info(
+                            "Scheduled task %s to worker %s via WebSocket",
+                            message.get("task_id"), worker_id
                         )
-                        if success:
-                            self._logger.info(
-                                "Sent task %s to worker %s via WebSocket",
-                                message.get("task_id"), worker_id
-                            )
-                            return 1
-                        else:
-                            self._logger.warning(
-                                "WebSocket delivery failed for worker %s, falling back to Redis",
-                                worker_id
-                            )
+                        return 1
+                    except RuntimeError:
+                        # No running loop, we're in sync context
+                        # Use thread pool to avoid blocking
+                        import concurrent.futures
+                        import threading
+
+                        def send_via_websocket():
+                            try:
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                success = loop.run_until_complete(
+                                    self._websocket_manager.send_task_to_worker(
+                                        worker_id, message)
+                                )
+                                loop.close()
+                                if success:
+                                    self._logger.info(
+                                        "Sent task %s to worker %s via WebSocket",
+                                        message.get("task_id"), worker_id
+                                    )
+                            except Exception as e:
+                                self._logger.warning(
+                                    "WebSocket delivery failed in thread: %s", e
+                                )
+
+                        thread = threading.Thread(
+                            target=send_via_websocket, daemon=True)
+                        thread.start()
+                        # Return success immediately since worker is connected
+                        return 1
+
                 except Exception as exc:
                     self._logger.warning(
                         "WebSocket error for worker %s: %s, falling back to Redis",

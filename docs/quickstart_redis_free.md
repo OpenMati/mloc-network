@@ -56,6 +56,11 @@ metadata:
   name: test-echo
 spec:
   taskType: echo
+  resources:
+    replicas: 1
+    hardware:
+      cpu: \"1\"
+      memory: \"1Gi\"
   input:
     message: Hello Redis-Free World!
   tags:
@@ -149,7 +154,23 @@ curl http://localhost:8000/ws/stats
 # 提交任务
 TASK_ID=$(curl -X POST http://localhost:8000/api/v1/tasks \
   -H "Content-Type: text/plain" \
-  -d "..." | jq -r '.[0].task_id')
+  -d "
+apiVersion: v1
+kind: Task
+metadata:
+  name: test-echo
+spec:
+  taskType: echo
+  resources:
+    replicas: 1
+    hardware:
+      cpu: \"1\"
+      memory: \"1Gi\"
+  input:
+    message: Hello Redis-Free World!
+  tags:
+    - test
+" | jq -r '.[0].task_id')
 
 # 查询任务状态
 curl http://localhost:8000/api/v1/tasks/$TASK_ID | jq
@@ -246,7 +267,23 @@ export HEARTBEAT_INTERVAL_SEC=60
 for i in {1..100}; do
   curl -X POST http://localhost:8000/api/v1/tasks \
     -H "Content-Type: text/plain" \
-    -d "..." &
+    -d "
+apiVersion: v1
+kind: Task
+metadata:
+  name: test-echo-$i
+spec:
+  taskType: echo
+  resources:
+    replicas: 1
+    hardware:
+      cpu: \"1\"
+      memory: \"1Gi\"
+  input:
+    message: Test $i
+  tags:
+    - test
+" &
 done
 wait
 
