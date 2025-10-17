@@ -239,21 +239,29 @@ class Runner:
         """Run in WebSocket mode - tasks come via WebSocket connection."""
         import asyncio
 
-        # Set the task callback
-        self.lifecycle.websocket_client.set_task_callback(
-            self._process_task_message)
+        async def run_websocket():
+            """Async wrapper to run WebSocket client."""
+            # Set the task callback
+            self.lifecycle.websocket_client.set_task_callback(
+                self._process_task_message)
 
-        # Start receiving messages
-        self.lifecycle.websocket_client.start_receiving()
+            try:
+                # Run the WebSocket client (connect and receive messages)
+                await self.lifecycle.websocket_client.run()
+            except KeyboardInterrupt:
+                self.logger.info(
+                    "Runner interrupted by user; shutting down WebSocket")
+            finally:
+                await self.lifecycle.websocket_client.disconnect()
 
+        # Run the async function
         try:
-            # Keep the main thread alive
-            asyncio.run(self.lifecycle.websocket_client.wait_until_stopped())
+            asyncio.run(run_websocket())
         except KeyboardInterrupt:
-            self.logger.info(
-                "Runner interrupted by user; shutting down WebSocket")
-        finally:
-            asyncio.run(self.lifecycle.websocket_client.disconnect())
+            self.logger.info("WebSocket runner stopped by user")
+        except Exception as exc:
+            self.logger.exception("WebSocket runner error: %s", exc)
+            raise
 
     def _start_redis_pubsub(self):
         """Run in Redis Pub/Sub mode - tasks come via Redis channels."""

@@ -220,16 +220,108 @@ async def get_metrics(_: Any = Depends(require_auth)):
 
 @app.get("/workers")
 async def list_workers(_: Any = Depends(require_auth)):
-    return list_workers_from_redis(rds)
+    """List all workers from both Redis and WebSocket connections."""
+    # Get workers from Redis
+    redis_workers = list_workers_from_redis(rds)
+
+    # Get WebSocket connection stats
+    ws_stats = WEBSOCKET_MANAGER.get_connection_stats()
+    ws_worker_ids = set(ws_stats.get("workers", {}).keys())
+
+    # Merge the information
+    all_workers = []
+    seen_worker_ids = set()
+
+    # Add Redis workers with WebSocket status
+    for worker in redis_workers:
+        worker_id = worker.get("worker_id")
+        seen_worker_ids.add(worker_id)
+        worker_dict = dict(worker)
+
+        # Add WebSocket connection info if available
+        if worker_id in ws_worker_ids:
+            ws_info = ws_stats["workers"][worker_id]
+            worker_dict["transport"] = "redis+websocket"
+            worker_dict["websocket"] = {
+                "connected": True,
+                "connected_at": ws_info["connected_at"],
+                "last_seen": ws_info["last_seen"],
+                "tasks_sent": ws_info["tasks_sent"],
+                "events_received": ws_info["events_received"],
+                "connected_seconds": ws_info["connected_seconds"],
+            }
+        else:
+            worker_dict["transport"] = "redis"
+            worker_dict["websocket"] = {"connected": False}
+
+        all_workers.append(worker_dict)
+
+    # Add WebSocket-only workers (not in Redis)
+    for worker_id in ws_worker_ids:
+        if worker_id not in seen_worker_ids:
+            ws_info = ws_stats["workers"][worker_id]
+            all_workers.append({
+                "worker_id": worker_id,
+                "status": "CONNECTED",
+                "transport": "websocket",
+                "websocket": {
+                    "connected": True,
+                    "connected_at": ws_info["connected_at"],
+                    "last_seen": ws_info["last_seen"],
+                    "tasks_sent": ws_info["tasks_sent"],
+                    "events_received": ws_info["events_received"],
+                    "connected_seconds": ws_info["connected_seconds"],
+                },
+            })
+
+    return {
+        "total": len(all_workers),
+        "redis_only": sum(1 for w in all_workers if w.get("transport") == "redis"),
+        "websocket_only": sum(1 for w in all_workers if w.get("transport") == "websocket"),
+        "both": sum(1 for w in all_workers if w.get("transport") == "redis+websocket"),
+        "workers": all_workers,
+    }
 
 
 @app.get("/workers/{worker_id}")
 async def get_worker(worker_id: str, _: Any = Depends(require_auth)):
+    """Get detailed information about a specific worker."""
     w = get_worker_from_redis(rds, worker_id)
-    if not w:
+    ws_connected = WEBSOCKET_MANAGER.is_worker_connected(worker_id)
+
+    if not w and not ws_connected:
         raise HTTPException(status_code=404, detail="worker not found")
-    stale = is_stale_by_redis(rds, worker_id)
-    return {**w.model_dump(), "stale": stale}
+
+    result = {}
+
+    # Add Redis information if available
+    if w:
+        stale = is_stale_by_redis(rds, worker_id)
+        result = {**w.model_dump(), "stale": stale}
+        result["transport"] = "redis+websocket" if ws_connected else "redis"
+    else:
+        result = {
+            "worker_id": worker_id,
+            "status": "CONNECTED",
+            "transport": "websocket",
+        }
+
+    # Add WebSocket information if connected
+    if ws_connected:
+        ws_stats = WEBSOCKET_MANAGER.get_connection_stats()
+        ws_info = ws_stats["workers"].get(worker_id, {})
+        result["websocket"] = {
+            "connected": True,
+            "connected_at": ws_info.get("connected_at"),
+            "last_seen": ws_info.get("last_seen"),
+            "tasks_sent": ws_info.get("tasks_sent", 0),
+            "events_received": ws_info.get("events_received", 0),
+            "connected_seconds": ws_info.get("connected_seconds", 0),
+        }
+    else:
+        result["websocket"] = {"connected": False}
+
+    return result
 
 # -------------------------
 # WebSocket endpoint for worker connections
@@ -244,6 +336,8 @@ async def websocket_worker_endpoint(websocket: WebSocket, worker_id: str):
     instead of using Redis Pub/Sub.
     """
     await websocket.accept()
+    import asyncio
+    await asyncio.sleep(0.01)
     logger.info("Worker %s connected via WebSocket", worker_id)
 
     async def handle_worker_event(event_data: Dict[str, Any]):

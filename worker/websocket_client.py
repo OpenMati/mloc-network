@@ -105,13 +105,26 @@ class WebSocketClient:
         try:
             self._logger.info(
                 "Connecting to orchestrator via WebSocket: %s", ws_url)
-            self._ws = await websockets.connect(ws_url)
+            # Add additional headers and connection parameters for compatibility
+            # Disable proxy to avoid python-socks requirement for local connections
+            additional_headers = {
+                "User-Agent": "mloc-worker/0.1.0",
+            }
+            self._ws = await websockets.connect(
+                ws_url,
+                additional_headers=additional_headers,
+                proxy=None,  # Disable proxy for local connections
+                ping_interval=20,
+                ping_timeout=10,
+                close_timeout=10,
+            )
             self._connected = True
             self._current_reconnect_delay = self._reconnect_interval
             self._logger.info("WebSocket connected successfully")
             return True
         except Exception as exc:
             self._logger.warning("Failed to connect WebSocket: %s", exc)
+            self._logger.debug("Full exception:", exc_info=True)
             self._connected = False
             self._ws = None
             return False
@@ -211,7 +224,7 @@ class WebSocketClient:
                     "Error in WebSocket receive loop: %s", exc)
                 await asyncio.sleep(1)
 
-    def start_receiving(self):
+    async def start_receiving(self):
         """Start the background task to receive messages."""
         if self._receive_task and not self._receive_task.done():
             return
@@ -219,6 +232,16 @@ class WebSocketClient:
         self._should_stop = False
         self._receive_task = asyncio.create_task(self._receive_loop())
         self._logger.info("Started WebSocket receive loop")
+
+    async def run(self):
+        """Run the WebSocket client (connect and receive messages).
+
+        This is the main entry point for running the WebSocket client.
+        It handles the receive loop until stopped.
+        """
+        await self.start_receiving()
+        if self._receive_task:
+            await self._receive_task
 
     async def wait_until_stopped(self):
         """Wait until the receive loop is stopped."""

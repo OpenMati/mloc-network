@@ -1,0 +1,100 @@
+{
+  "last_updated": "2025-10-17T07:42:58.495558+00:00",
+  "counters": {
+    "tasks_submitted": 0,
+    "tasks_succeeded": 0,
+    "tasks_failed": 0,
+    "tasks_requeued": 0,
+    "workers_registered": 0,
+    "workers_unregistered": 0,
+    "worker_heartbeats": 1
+  },
+  "active_workers": [],
+  "active_workers_count": 0,
+  "task_timings": {
+    "overall": {
+      "queue_avg_sec": null,
+      "queue_samples": 0,
+      "execution_avg_sec": null,
+      "execution_samples": 0,
+      "total_avg_sec": null,
+      "total_samples": 0
+    },
+    "inference": {
+      "queue_avg_sec": null,
+      "queue_samples": 0,
+      "execution_avg_sec": null,
+      "execution_samples": 0,
+      "total_avg_sec": null,
+      "total_samples": 0
+    },
+    "training": {
+      "queue_avg_sec": null,
+      "queue_samples": 0,
+      "execution_avg_sec": null,
+      "execution_samples": 0,
+      "total_avg_sec": null,
+      "total_samples": 0
+    },
+    "other": {
+      "queue_avg_sec": null,
+      "queue_samples": 0,
+      "execution_avg_sec": null,
+      "execution_samples": 0,
+      "total_avg_sec": null,
+      "total_samples": 0
+    }
+  },
+  "slo": {
+    "overall": {
+      "with_slo": 0,
+      "met": 0,
+      "breached": 0,
+      "missing": 0,
+      "completion_rate": null
+    },
+    "inference": {
+      "with_slo": 0,
+      "met": 0,
+      "breached": 0,
+      "missing": 0,
+      "completion_rate": null
+    },
+    "training": {
+      "with_slo": 0,
+      "met": 0,
+      "breached": 0,
+      "missing": 0,
+      "completion_rate": null
+    },
+    "other": {
+      "with_slo": 0,
+      "met": 0,
+      "breached": 0,
+      "missing": 0,
+      "completion_rate": null
+    }
+  },
+  "workers": {
+    "entries": {
+      "my-ws-worker": {
+        "status": "offline",
+        "cost_per_hour": null,
+        "uptime_sec": null,
+        "accrued_cost_usd": null,
+        "avg_cpu_watts": null,
+        "avg_gpu_watts": null,
+        "per_gpu_avg_watts": {},
+        "power_samples": {
+          "cpu": 0,
+          "gpu": 0
+        }
+      }
+    },
+    "totals": {
+      "accrued_cost_usd": 0.0,
+      "worker_count": 1
+    }
+  },
+  "completed_tasks": 0
+}
