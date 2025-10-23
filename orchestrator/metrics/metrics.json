@@ -1,23 +1,25 @@
 {
-  "last_updated": "2025-10-23T08:33:55.464392+00:00",
+  "last_updated": "2025-10-23T09:35:05.295195+00:00",
   "counters": {
     "tasks_submitted": 2,
     "tasks_succeeded": 2,
     "tasks_failed": 0,
     "tasks_requeued": 0,
-    "workers_registered": 0,
+    "workers_registered": 2,
     "workers_unregistered": 0,
-    "worker_heartbeats": 5
+    "worker_heartbeats": 19
   },
-  "active_workers": [],
-  "active_workers_count": 0,
+  "active_workers": [
+    "hello-worker"
+  ],
+  "active_workers_count": 1,
   "task_timings": {
     "overall": {
-      "queue_avg_sec": 0.0054094791412353516,
+      "queue_avg_sec": 0.002351522445678711,
       "queue_samples": 2,
-      "execution_avg_sec": 0.005461454391479492,
+      "execution_avg_sec": 0.0013104677200317383,
       "execution_samples": 2,
-      "total_avg_sec": 0.01087188720703125,
+      "total_avg_sec": 0.0036596059799194336,
       "total_samples": 2
     },
     "inference": {
@@ -37,11 +39,11 @@
       "total_samples": 0
     },
     "other": {
-      "queue_avg_sec": 0.0054094791412353516,
+      "queue_avg_sec": 0.002351522445678711,
       "queue_samples": 2,
-      "execution_avg_sec": 0.005461454391479492,
+      "execution_avg_sec": 0.0013104677200317383,
       "execution_samples": 2,
-      "total_avg_sec": 0.01087188720703125,
+      "total_avg_sec": 0.0036596059799194336,
       "total_samples": 2
     }
   },
@@ -77,11 +79,11 @@
   },
   "workers": {
     "entries": {
-      "my-ws-worker": {
-        "status": "offline",
-        "cost_per_hour": null,
-        "uptime_sec": null,
-        "accrued_cost_usd": null,
+      "hello-worker": {
+        "status": "active",
+        "cost_per_hour": 0.0,
+        "uptime_sec": 210.1208851337433,
+        "accrued_cost_usd": 0.0,
         "avg_cpu_watts": null,
         "avg_gpu_watts": null,
         "per_gpu_avg_watts": {},

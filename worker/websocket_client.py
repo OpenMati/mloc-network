@@ -121,6 +121,14 @@ class WebSocketClient:
             self._connected = True
             self._current_reconnect_delay = self._reconnect_interval
             self._logger.info("WebSocket connected successfully")
+
+            # Call on_connect callback if set
+            if hasattr(self, '_on_connect_callback') and callable(self._on_connect_callback):
+                try:
+                    self._on_connect_callback()
+                except Exception as e:
+                    self._logger.warning("Error in on_connect callback: %s", e)
+
             return True
         except Exception as exc:
             self._logger.warning("Failed to connect WebSocket: %s", exc)

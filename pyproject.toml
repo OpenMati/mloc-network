@@ -69,3 +69,12 @@ observability = [
     "arize-phoenix-client>=1.14.1",
     "arize-phoenix-otel>=0.11.0",
 ]
+
+[tool.ruff]
+exclude = ["mloc_sdk/my_first_executor.py"]
+
+[tool.ruff.lint]
+ignore = ["E402"]  # Allow module level import not at top of file
+
+[tool.isort]
+skip = ["mloc_sdk/my_first_executor.py"]
