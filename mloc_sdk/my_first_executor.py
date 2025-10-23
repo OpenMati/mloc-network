@@ -1,9 +1,13 @@
 # Setup path before imports - DO NOT REORDER
-import sys; from pathlib import Path; _r = Path(__file__).resolve().parent.parent; sys.path.insert(0, str(_r)); sys.path.insert(0, str(_r / "worker")); sys.path.insert(0, str(_r / "orchestrator"))  # noqa: E702
-
-from typing import Any, Dict
-from mloc_sdk.base import BaseExecutor
 from mloc_sdk.worker import WorkerSDK
+from mloc_sdk.base import BaseExecutor
+from typing import Any, Dict
+import sys
+from pathlib import Path
+_r = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_r))
+sys.path.insert(0, str(_r / "worker"))
+sys.path.insert(0, str(_r / "orchestrator"))  # noqa: E702
 
 
 class HelloWorldExecutor(BaseExecutor):
@@ -33,7 +37,7 @@ class HelloWorldExecutor(BaseExecutor):
 if __name__ == "__main__":
     # Create SDK
     sdk = WorkerSDK(
-        worker_id="hello-worker",
+        worker_id="hello-worker-123",
         orchestrator_url="ws://localhost:8000/ws/worker",
         description="Hello World executor for testing",
         log_level="INFO"
