@@ -1,0 +1,17 @@
+# Docker Compose Configuration Example - WebSocket and Redis Hybrid Deployment
+# 
+# This example demonstrates how to deploy workers using both WebSocket and Redis
+
+version: '3.8'
+
+services:
+  # Redis service (for worker registration and state management)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3

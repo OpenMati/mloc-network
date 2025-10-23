@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""任务状态持久化与恢复工具。"""
+"""Task state persistence and recovery utilities."""
 
 import json
 import threading
@@ -13,7 +13,7 @@ from utils import now_iso
 
 
 class StateManager:
-    """负责周期性写入 TaskStore/TaskRecord 快照，并支持重启恢复。"""
+    """Responsible for periodically writing TaskStore/TaskRecord snapshots and supporting restart recovery."""
 
     def __init__(
         self,
@@ -47,7 +47,7 @@ class StateManager:
     # -------------------------
 
     def load_snapshot(self) -> List[str]:
-        """从磁盘读取快照并恢复内存结构，返回需重新调度的 task_id 列表。"""
+        """Read snapshot from disk and restore in-memory structures, return list of task_ids that need rescheduling."""
         if not self._state_path.exists():
             return []
         try:
@@ -58,7 +58,7 @@ class StateManager:
         return self._apply_snapshot(payload)
 
     def start(self) -> None:
-        """启动后台线程，周期写入快照。"""
+        """Start background thread for periodic snapshot writes."""
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
@@ -66,7 +66,7 @@ class StateManager:
         self._thread.start()
 
     def stop(self) -> None:
-        """停止后台线程并执行一次最终写入。"""
+        """Stop background thread and perform one final write."""
         self._stop_event.set()
         self._dirty_event.set()
         if self._thread:
@@ -77,11 +77,11 @@ class StateManager:
             self._logger.warning("Final state flush failed: %s", exc)
 
     def mark_dirty(self) -> None:
-        """标记状态已变化，触发近期刷新。"""
+        """Mark state as changed, triggering near-term flush."""
         self._dirty_event.set()
 
     def flush(self) -> None:
-        """立即写入快照。"""
+        """Write snapshot immediately."""
         snapshot = self._collect_snapshot()
         if snapshot is None:
             return

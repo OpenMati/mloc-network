@@ -1,34 +1,44 @@
 # MLOC - Modular LLM Operations Container
 
 MLOC provides a scalable control plane for Large Language Model workloads. The
-system consists of an **Orchestrator** (FastAPI), a fleet of **Workers**, and a
-Redis-backed pub/sub bus for dispatch and status tracking. Tasks are described
-in YAML and can run spectrum from single-shot inference to multi-stage PPO/DPO
-training pipelines.
+system consists of an **Orchestrator** (FastAPI), a fleet of **Workers**, and
+flexible transport layers (Redis pub/sub or WebSocket) for dispatch and status 
+tracking. Tasks can be submitted via YAML or Simple Task API and can run spectrum 
+from single-shot inference to multi-stage PPO/DPO training pipelines.
 
 ```
-+-------------+    HTTP API    +--------------+    Redis Pub/Sub    +-------------+
-|   Client    | -------------> | Orchestrator | -----------------> |   Worker    |
-+-------------+                +--------------+                    +-------------+
-                                      |                                    |
++-------------+    HTTP API    +--------------+    Redis/WebSocket    +-------------+
+|   Client    | -------------> | Orchestrator | ------------------> |   Worker    |
+|             |                |              |                      | (built-in   |
++-------------+                +--------------+                      |  or SDK)    |
+                                      |                              +-------------+
                                       |                                    |
                                       v                                    v
                               +-------------+                      +-------------+
                               |    Redis    |                      |  Executors  |
-                              |  (Broker)   |                      | (vLLM, TRL) |
+                              | (Optional)  |                      | (vLLM, TRL) |
                               +-------------+                      +-------------+
 ```
 
 ## Components
-- **Orchestrator** – Parses YAML, manages dependencies, schedules work, and
-  aggregates results/events.
-- **Workers** – Subscribe to Redis topics, pick executors (vLLM, Hugging Face
-  Transformers, PPO/DPO), and write outputs.
-- **Redis** – Message bus plus lightweight state store for worker metadata and
-  task status notifications.
+- **Orchestrator** – Parses YAML or Simple Task API requests, manages dependencies, 
+  schedules work, aggregates results/events, and provides WebSocket support for 
+  real-time worker communication.
+- **Workers** – Connect via Redis topics or WebSocket, pick executors (vLLM, 
+  Hugging Face Transformers, PPO/DPO, custom SDK executors), and write outputs.
+- **MLOC SDK** – Python SDK for building custom executors with minimal boilerplate,
+  supporting both class-based and decorator-based patterns.
+- **Redis** – Optional message bus plus lightweight state store for worker metadata 
+  and task status notifications (can be replaced by WebSocket transport).
 
 ## Key Capabilities
-- Declarative task definitions with optional `spec.stages` pipelines.
+- **Dual Transport Modes**: Redis pub/sub for distributed deployments or WebSocket 
+  for simplified, real-time communication without Redis dependency.
+- **Simple Task API**: Submit tasks via JSON payload (`/api/v1/tasks/simple`) for 
+  quick integration without YAML template knowledge.
+- **MLOC SDK**: Build custom executors with a high-level Python SDK supporting 
+  lifecycle hooks, decorators, and automatic result serialization.
+- Declarative task definitions with optional `spec.stages` pipelines (YAML mode).
 - Resource-aware scheduling with optional data-parallel fan-out when
   `spec.parallel.enabled=true` for inference jobs.
 - Flexible artifact delivery: Workers can persist to shared storage or upload
@@ -40,32 +50,66 @@ training pipelines.
   workers write to the same location.
 
 ## Quick Start (local)
-### 1. Install dependencies (via uv)
+
+### Option A: WebSocket Mode (No Redis Required)
+
+The simplest way to get started with a single orchestrator and worker.
+
+#### 1. Install dependencies (via uv)
 ```bash
-# 安装 uv（如系统已安装可跳过，更多方式参考 https://docs.astral.sh/uv ）
+# Install uv (skip if already installed, see https://docs.astral.sh/uv)
 pip install uv
 
-# 创建并激活隔离环境
+# Create and activate virtual environment
 uv venv .venv
 source .venv/bin/activate
 
-# 同步 orchestrator + 默认 worker 所需依赖（含 transformers/torch）
+# Sync orchestrator + default worker dependencies (includes transformers/torch)
 uv sync --extra inference
 
-# 如需其它能力，可追加 extras：
-# uv sync --extra inference --extra rag       # 启用 RAG
-# uv sync --extra inference --extra agent     # 启用 Agent 执行器
-# uv sync --all-extras                        # 安装全部可选组件
+# For additional capabilities, add extras:
+# uv sync --extra inference --extra rag       # Enable RAG
+# uv sync --extra inference --extra agent     # Enable Agent executors
+# uv sync --all-extras                        # Install all optional components
 ```
-详见 `docs/executors.md` 获取每个 `taskType` 对应的执行器和可选依赖说明。`uv sync`
-会读取仓库内的 `uv.lock`，确保不同机器之间依赖版本一致。
+See `docs/executors.md` for each `taskType` and its corresponding executor dependencies. 
+`uv sync` reads the repo's `uv.lock` to ensure consistent dependency versions across machines.
 
-Start Redis:
+#### 2. Run the Orchestrator
+```bash
+export ORCHESTRATOR_TOKEN="dev-token"  # optional auth
+export ORCHESTRATOR_RESULTS_DIR=./results_host
+uv run python orchestrator/main.py
+# listens on 0.0.0.0:8000 (override with PORT)
+```
+
+#### 3. Run a Worker (WebSocket mode)
+```bash
+export RESULTS_DIR=./results_workers    # or an NFS mount
+export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8000"
+export WORKER_TRANSPORT="websocket"     # Use WebSocket transport
+uv run python worker/main.py
+```
+
+Workers connect to the orchestrator via WebSocket (`ws://127.0.0.1:8000/ws/worker`),
+register their capabilities, and receive tasks in real-time.
+
+---
+
+### Option B: Redis Mode (Distributed Deployment)
+
+For multi-orchestrator or distributed setups, use Redis as the message bus.
+
+#### 1. Install dependencies (same as Option A)
+
+#### 2. Start Redis
 ```bash
 redis-server
+# or use docker:
+docker compose -f docker-compose.redis.yml up
 ```
 
-### 2. Run the Orchestrator
+#### 3. Run the Orchestrator
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
 export ORCHESTRATOR_TOKEN="dev-token"  # optional auth
@@ -74,33 +118,132 @@ uv run python orchestrator/main.py
 # listens on 0.0.0.0:8000 (override with PORT)
 ```
 
-### 3. Run a Worker
+#### 4. Run a Worker (Redis mode)
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
 export RESULTS_DIR=./results_workers    # or an NFS mount
 export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8000"  # enable HTTP artifact uploads
 uv run python worker/main.py
 ```
+
 Workers register with Redis, stream heartbeats, and execute incoming tasks.
 If the YAML sets `spec.output.destination.path`, results go there; otherwise
 `RESULTS_DIR/<task_id>/responses.json` is used.
 
-### 4. Inspect built-in metrics
+---
+
+### Common Steps for Both Modes
+
+#### 5. Inspect built-in metrics
 ```bash
 curl http://127.0.0.1:8000/metrics
 ```
 The response aggregates event counters (tasks succeeded/failed/requeued, active
 workers, heartbeat counts) and is refreshed whenever the orchestrator receives
-Redis events.
+Redis events or WebSocket messages.
 
-### 5. Submit a task
+#### 6. Submit a task
+
+**Option 1: Simple Task API (JSON)**
+```bash
+curl -X POST "http://localhost:8000/api/v1/tasks/simple" \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskType": "hello-world",
+    "input": {
+      "name": "World",
+      "message": "Hello from MLOC!"
+    },
+    "tags": ["demo"],
+    "sloSeconds": 60
+  }'
+```
+
+**Option 2: YAML Template**
 ```bash
 curl -X POST "http://localhost:8000/api/v1/tasks" \
   -H "Authorization: Bearer dev-token" \
   -H "Content-Type: text/yaml" \
   --data-binary @templates/inference_vllm_mistral.yaml
 ```
-Samples under `client/` run similar requests.
+
+See `docs/simple_api_examples.md` for more Simple Task API examples and patterns.
+
+---
+
+## MLOC SDK - Build Custom Executors
+
+The MLOC SDK provides a simplified interface for creating custom task executors
+without dealing with infrastructure concerns like transport, lifecycle management,
+or result serialization.
+
+### Quick Example: Class-Based Executor
+
+```python
+from pathlib import Path
+from typing import Any, Dict
+from mloc_sdk import BaseExecutor, WorkerSDK
+
+class GreetingExecutor(BaseExecutor):
+    name = "greeting"
+    description = "Generates personalized greetings"
+    version = "1.0.0"
+    
+    def execute(self, task_spec: Dict[str, Any], output_dir: Path) -> Dict[str, Any]:
+        name = task_spec.get("name", "World")
+        language = task_spec.get("language", "en")
+        
+        greetings = {
+            "en": f"Hello, {name}!",
+            "es": f"¡Hola, {name}!",
+            "zh": f"你好, {name}!",
+        }
+        
+        greeting = greetings.get(language, greetings["en"])
+        result = {"greeting": greeting, "name": name, "language": language}
+        
+        self.save_json(output_dir / "greeting.json", result)
+        return result
+
+# Create and run worker
+if __name__ == "__main__":
+    sdk = WorkerSDK(orchestrator_url="ws://localhost:8000/ws/worker")
+    sdk.register_executor(GreetingExecutor())
+    sdk.run()
+```
+
+### Decorator-Based Executor
+
+```python
+from mloc_sdk import executor, WorkerSDK
+
+@executor(name="calculator", description="Performs arithmetic")
+def calculate(task_spec, output_dir):
+    a = task_spec.get("a", 0)
+    b = task_spec.get("b", 0)
+    operation = task_spec.get("operation", "add")
+    
+    result = a + b if operation == "add" else a - b
+    return {"a": a, "b": b, "operation": operation, "result": result}
+
+if __name__ == "__main__":
+    sdk = WorkerSDK(orchestrator_url="ws://localhost:8000/ws/worker")
+    sdk.register_executor(calculate)
+    sdk.run()
+```
+
+### Features
+- ✨ **Simple API**: Inherit from `BaseExecutor` or use `@executor` decorator
+- 🔄 **Lifecycle Management**: Automatic prepare, execute, cleanup, and teardown
+- 🚀 **WebSocket Transport**: Real-time communication (Redis-free)
+- 📦 **Built-in Utilities**: JSON/text helpers, logging, validation
+- 🎯 **Type Safe**: Full type hints for IDE support
+- 🔌 **Pluggable**: Register multiple executors in a single worker
+
+See `mloc_sdk/README.md` and `mloc_sdk/QUICKSTART.md` for comprehensive guides and examples.
+
+---
 
 ## YAML Primer
 ```yaml
@@ -130,65 +273,64 @@ spec:
   own subdirectory containing `responses.json`, `manifest.json`, `logs/` and
   `artifacts/`.
 - **Orchestrator output root** defaults to `./results_host`. Results ingested by
-  `/api/v1/results` are stored under this tree，上传接口会自动落盘到
-  `artifacts/<filename>` 并刷新 manifest。
+  `/api/v1/results` are stored under this tree; upload endpoint automatically
+  persists to `artifacts/<filename>` and refreshes manifest.
 - Stage-to-stage pipelines can reference uploaded archives using
   `checkpoint.load.url`, for example
   `url: "${stage1.result.final_model_archive_url}"`.
 - If you prefer classic shared storage, point both `RESULTS_DIR` variables at a
   common mount and skip HTTP uploads.
 
-每次任务运行后会调用 `orchestrator.manifest_utils.sync_manifest` 同步 `manifest.json`，其中对
-在模板中声明的 `spec.output.artifacts` 会标注 `status` 为 `present` 或 `missing`，
-方便在验证阶段快速定位缺失工件。
+Each task run invokes `orchestrator.manifest_utils.sync_manifest` to sync `manifest.json`,
+marking artifacts declared in `spec.output.artifacts` as `present` or `missing` for
+easy validation of deliverables.
 
 ## State & Metrics
 
-- `StateManager` 默认关闭；设置 `ORCHESTRATOR_STATE_ENABLED=1` 后，会定期将
-  `TaskStore`、任务记录和父子分片信息写入
-  `${ORCHESTRATOR_STATE_DIR:-./state}/task_state.json`，并在重启时自动恢复。
-- 指标快照默认写入 `${ORCHESTRATOR_METRICS_DIR:-./metrics}/metrics.json`，同时在
-  `/metrics` HTTP 接口中提供实时快照。原始事件以 JSONL 形式写入
-  `${ORCHESTRATOR_METRICS_DIR:-./metrics}/events.log`。
+- `StateManager` is disabled by default; set `ORCHESTRATOR_STATE_ENABLED=1` to
+  periodically write `TaskStore`, task records, and parent-child shard info to
+  `${ORCHESTRATOR_STATE_DIR:-./state}/task_state.json` with auto-recovery on restart.
+- Metrics snapshot defaults to `${ORCHESTRATOR_METRICS_DIR:-./metrics}/metrics.json`,
+  also exposed via `/metrics` HTTP endpoint for real-time monitoring. Raw events
+  are written to `${ORCHESTRATOR_METRICS_DIR:-./metrics}/events.log` in JSONL format.
 
 ### Key environment variables
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | ---- | ------ | ---- |
-| `ORCHESTRATOR_STATE_ENABLED` | `0` | 是否启用状态快照与恢复 |
-| `ORCHESTRATOR_STATE_DIR` | `./state` | 状态快照目录（启用快照时生效） |
-| `ORCHESTRATOR_METRICS_DIR` | 取决于 `STATE_ENABLED`（默认为 `./metrics`） | 指标输出目录 |
-| `STATE_FLUSH_INTERVAL_SEC` | `5` | 状态写盘周期 |
-| `RESULTS_DIR` | `./results_host` | Orchestrator 结果目录 |
-| `ORCHESTRATOR_TOKEN` | 无 | 可选的 Bearer Token，用于保护 API |
+| `ORCHESTRATOR_STATE_ENABLED` | `0` | Enable state snapshot and recovery |
+| `ORCHESTRATOR_STATE_DIR` | `./state` | State snapshot directory (when enabled) |
+| `ORCHESTRATOR_METRICS_DIR` | Depends on `STATE_ENABLED` (default `./metrics`) | Metrics output directory |
+| `STATE_FLUSH_INTERVAL_SEC` | `5` | State flush interval in seconds |
+| `RESULTS_DIR` | `./results_host` | Orchestrator results directory |
+| `ORCHESTRATOR_TOKEN` | none | Optional Bearer token for API protection |
+| `WORKER_TRANSPORT` | `redis` | Transport mode: `redis` or `websocket` |
 
 ## Testing
 
-轻量级单元测试覆盖任务池、manifest、聚合与指标逻辑：
+Lightweight unit tests cover task pool, manifest, aggregation, and metrics logic:
 
 ```bash
 uv run pytest tests/test_core_flow.py
 ```
-运行结果会记录在 `.codex/testing.md` 与 `verification.md`，方便回溯。
 
-## Validation Helpers
-
-- `scripts/worker_validate.py` —— 通过 `echo` 模板快速验证本地 orchestrator/worker 流；支持 `--scenario echo-local` 与 `--scenario echo-http`。
-- `scripts/validate_echo_local.sh` 与 `scripts/validate_echo_http.sh` —— 基于环境变量 `ORCHESTRATOR_URL`、`ORCHESTRATOR_TOKEN` 进行常用场景验证。
-- `scripts/replay_task.py` —— 从状态快照中读取原始 YAML 并重新提交任务（便于失败重放）。
-- `scripts/export_results.py` —— 收集 `RESULTS_DIR` 下的 `responses.json`，导出为 CSV（可结合 `--state-file` 丰富元数据）。
-- `scripts/task_profile_report.py` —— 基于导出的 CSV 生成 Markdown 报告，统计成功率与平均耗时。
+Test results are recorded in `.codex/testing.md` and `verification.md` for traceability.
 
 ## Docker Compose Deployment
 
-提供 `docker-compose.yml` 与 `.env.example`，可一键启动 Redis、Orchestrator 与 Worker：
+Provides `docker-compose.yml`, `docker-compose.redis.yml`, and `docker-compose.websocket.yml` 
+with `.env.example` for one-command deployment of Redis, Orchestrator, and Workers:
 
 ```bash
 cp .env.example .env
-docker compose up --build
+# For Redis mode:
+docker compose -f docker-compose.redis.yml up --build
+# For WebSocket mode:
+docker compose -f docker-compose.websocket.yml up --build
 ```
 
-默认将结果与状态写入 `./data/` 目录，可按需调整 `.env` 中的路径或添加额外 extras（例如训练、RAG）。
+By default, results and state are written to `./data/` directory. Adjust paths
+or add extras (training, RAG, etc.) in `.env` as needed.
 
 ## Shared Storage via NFS (optional)
 1. Export an NFS directory on the orchestrator or storage host (instructions in
@@ -202,11 +344,18 @@ docker compose up --build
 README.md                 # Top-level overview
 orchestrator/             # Scheduling service + docs
 worker/                   # Worker process, executors, docker assets
-client/                   # Submission helpers
-templates/                # YAML examples
+mloc_sdk/                 # Python SDK for custom executors
+templates/                # YAML task examples
+docs/                     # Additional documentation
+  simple_api_examples.md  # Simple Task API usage examples
+  executors.md            # Executor types and dependencies
+  runbook.md              # Operations runbook
+examples/                 # SDK usage examples
 ```
 
 See also:
 - `orchestrator/README.md` for API and scheduling internals.
 - `worker/README.md` for worker configuration and runtime flow.
-- `worker/docker/README.md` for container-focused instructions.
+- `mloc_sdk/README.md` for SDK comprehensive guide.
+- `mloc_sdk/QUICKSTART.md` for getting started with custom executors.
+- `docs/simple_api_examples.md` for Simple Task API patterns.

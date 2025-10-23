@@ -38,7 +38,7 @@ def validate_yaml_to_dict(yaml_text: str) -> Dict[str, Any]:
     Raises HTTP 400 with actionable error messages on failure.
 
     Notes:
-      - 基于 Pydantic 模型进行结构化校验，错误信息会提示具体字段路径。
+      - Performs structured validation based on Pydantic models, with error messages indicating specific field paths.
     """
     try:
         data = yaml.safe_load(yaml_text)

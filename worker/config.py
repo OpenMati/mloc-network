@@ -24,8 +24,11 @@ class WorkerConfig:
     hb_ttl_sec: int
     worker_id: str
     tags: List[str]
+    description: str
     log_level: str
     cost_per_hour: float
+    use_websocket: bool
+    orchestrator_url: str
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -33,26 +36,41 @@ class WorkerConfig:
 
         topic = os.getenv("TASK_TOPIC", DEFAULT_TOPIC)
 
-        results_dir = Path(os.getenv("RESULTS_DIR", "./results_workers")).absolute()
+        results_dir = Path(
+            os.getenv("RESULTS_DIR", "./results_workers")).absolute()
         results_dir.mkdir(parents=True, exist_ok=True)
 
         hb_interval = int(os.getenv("HEARTBEAT_INTERVAL_SEC", "30"))
         hb_ttl = max(hb_interval * 4, 120)
 
         worker_id = os.getenv("WORKER_ID", "").strip() or os.urandom(8).hex()
-        tags = [t.strip() for t in os.getenv("WORKER_TAGS", "").split(',') if t.strip()]
+        tags = [t.strip() for t in os.getenv(
+            "WORKER_TAGS", "").split(',') if t.strip()]
+        description = os.getenv("WORKER_DESCRIPTION", "").strip()
 
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
         cost_raw = os.getenv("WORKER_COST_PER_HOUR")
         if cost_raw is None:
-            raise SystemExit("WORKER_COST_PER_HOUR must be set, e.g. 3.5 for $3.5/hour")
+            raise SystemExit(
+                "WORKER_COST_PER_HOUR must be set, e.g. 3.5 for $3.5/hour")
         try:
             cost_per_hour = float(cost_raw)
         except ValueError as exc:
-            raise SystemExit(f"Invalid WORKER_COST_PER_HOUR value: {cost_raw}") from exc
+            raise SystemExit(
+                f"Invalid WORKER_COST_PER_HOUR value: {cost_raw}") from exc
         if cost_per_hour < 0:
             raise SystemExit("WORKER_COST_PER_HOUR must be non-negative")
+
+        # WebSocket configuration
+        use_websocket = os.getenv(
+            "WORKER_USE_WEBSOCKET", "").lower() in ("1", "true", "yes")
+        orchestrator_url = os.getenv("ORCHESTRATOR_BASE_URL", "")
+
+        if use_websocket and not orchestrator_url:
+            raise SystemExit(
+                "ORCHESTRATOR_BASE_URL must be set when WORKER_USE_WEBSOCKET is enabled"
+            )
 
         return WorkerConfig(
             redis_url=redis_url,
@@ -62,6 +80,9 @@ class WorkerConfig:
             hb_ttl_sec=hb_ttl,
             worker_id=worker_id,
             tags=tags,
+            description=description,
             log_level=log_level,
             cost_per_hour=cost_per_hour,
+            use_websocket=use_websocket,
+            orchestrator_url=orchestrator_url,
         )

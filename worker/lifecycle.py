@@ -13,24 +13,28 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from power import PowerMonitor
-from redis_worker import RedisWorker
+from worker_transport import WorkerTransport
 
 
 class Lifecycle:
     def __init__(
         self,
-        rworker: RedisWorker,
+        transport: WorkerTransport,
         hb_sec: int,
         hb_ttl_sec: int,
         *,
         cost_per_hour: float,
         power_monitor: Optional[PowerMonitor] = None,
+        websocket_client=None,
     ):
-        self.rworker = rworker
+        self.transport = transport
+        # Keep rworker for backward compatibility
+        self.rworker = transport
         self.hb_sec = hb_sec
         self.hb_ttl_sec = hb_ttl_sec
         self.cost_per_hour = cost_per_hour
         self.power_monitor = power_monitor or PowerMonitor()
+        self.websocket_client = websocket_client
         self.stop = threading.Event()
         self._started_ts: Optional[float] = None
 
@@ -49,54 +53,59 @@ class Lifecycle:
             metrics["power"] = power_sample
         return metrics
 
-    def start(self, env: Dict[str, Any], hardware: Dict[str, Any], tags: List[str]):
+    def start(self, env: Dict[str, Any], hardware: Dict[str, Any], tags: List[str], description: str = "", task_types: Optional[List[str]] = None):
         self._started_ts = time.time()
         try:
             initial_power = self.power_monitor.sample()
         except Exception:
             initial_power = None
-        self.rworker.register(
+        self.transport.register(
             status="STARTING",
             started_at=datetime.now(timezone.utc).isoformat(),
             pid=os.getpid(),
             env=env,
             hardware=hardware,
             tags=tags,
+            description=description,
+            task_types=task_types or [],
             cost_per_hour=self.cost_per_hour,
             power_metrics=initial_power,
         )
-        self.rworker.set_status("IDLE")
+        self.transport.set_status("IDLE")
         threading.Thread(target=self._hb_loop, daemon=True).start()
 
     def _hb_loop(self):
         while not self.stop.is_set():
             try:
-                self.rworker.heartbeat(ttl_sec=self.hb_ttl_sec, metrics=self._metrics())
+                metrics = self._metrics()
+                self.transport.heartbeat(
+                    ttl_sec=self.hb_ttl_sec, metrics=metrics)
             except Exception:
                 pass
             self.stop.wait(self.hb_sec)
 
     def set_running(self, task_id: str):
         try:
-            self.rworker.set_status("RUNNING", {"task_id": task_id})
+            self.transport.set_status("RUNNING", {"task_id": task_id})
         except Exception:
             pass
 
     def set_idle(self, task_id: str):
         try:
-            self.rworker.set_status("IDLE", {"last_task": task_id})
+            self.transport.set_status("IDLE", {"last_task": task_id})
         except Exception:
             pass
-        
+
     def set_failed(self, task_id: str, error: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
         try:
-            self.rworker.task_failed(task_id, error=error, metadata=metadata)
+            self.transport.task_failed(
+                task_id, error=error or "Unknown error", metadata=metadata)
         except Exception:
             pass
-    
+
     def set_succeeded(self, task_id: str, metadata: Optional[Dict[str, Any]] = None):
         try:
-            self.rworker.task_succeeded(task_id, metadata=metadata)
+            self.transport.task_succeeded(task_id, metadata=metadata)
         except Exception:
             pass
 
@@ -108,7 +117,7 @@ class Lifecycle:
         started_at: str,
     ) -> None:
         try:
-            self.rworker.task_started(
+            self.transport.task_started(
                 task_id,
                 task_type=task_type,
                 dispatched_at=dispatched_at,
@@ -128,7 +137,7 @@ class Lifecycle:
             uptime = max(0.0, time.time() - self._started_ts)
         summary = self.power_monitor.summary()
         try:
-            self.rworker.unregister(
+            self.transport.unregister(
                 cost_per_hour=self.cost_per_hour,
                 uptime_sec=uptime,
                 power_summary=summary,

@@ -2,11 +2,11 @@
 """
 PPOExecutor (YAML schema specific)
 
-- 从 spec.model 读取基础模型配置  
-- 从 spec.training 读取PPO训练参数
-- 从 spec.data 读取训练数据配置
-- 使用TRL的trainer.train()进行训练
-- 训练结果写到 out_dir/responses.json
+- Read base model configuration from spec.model  
+- Read PPO training parameters from spec.training
+- Read training data configuration from spec.data
+- Train using TRL's trainer.train()
+- Write training results to out_dir/responses.json
 """
 
 import os

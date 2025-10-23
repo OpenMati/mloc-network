@@ -174,3 +174,6 @@ worker/executors/agent/secrets.yaml
 results_workers/
 results_host/
 dump.rdb
+
+orchestrator/metrics
+examples/

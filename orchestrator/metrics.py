@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""增强版指标记录器：跟踪任务耗时、SLO 达成率与 worker 成本/功耗。"""
+"""Enhanced metrics recorder: tracks task duration, SLO achievement rate, and worker cost/power consumption."""
 
 import json
 import time

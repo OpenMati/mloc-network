@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import copy
 import json
+import logging
 import threading
 import time
 import uuid
@@ -37,7 +38,8 @@ class PoolEntry:
         slo = getattr(self.record, "slo_seconds", None)
         if not slo or slo <= 0:
             return 0.0
-        submitted_ts = getattr(self.record, "submitted_ts", None) or self.enqueued_at
+        submitted_ts = getattr(
+            self.record, "submitted_ts", None) or self.enqueued_at
         elapsed = max(0.0, (now or time.time()) - submitted_ts)
         return 0.0 if slo <= 0 else elapsed / slo
 
@@ -52,21 +54,26 @@ class DispatchPlan:
 
 
 # -----------------------------
-# In-memory pool with SLO gating
+# Redis-backed pool with SLO gating
 # -----------------------------
 
 class TaskPool:
     """
-    A small in-memory pool. Entries are drained when either:
+    A Redis-backed task pool. Entries are drained when either:
       - the pool size reaches batch_size, or
       - any entry's SLO progress crosses the configured threshold.
     """
 
-    def __init__(self, batch_size: int, slo_fraction: float) -> None:
+    def __init__(self, batch_size: int, slo_fraction: float, redis_client=None, logger=None) -> None:
         self._batch_size = max(1, int(batch_size))
         self._slo_fraction = max(0.0, float(slo_fraction))
-        self._entries: Dict[str, PoolEntry] = {}
+        self._redis = redis_client
         self._lock: Optional[threading.RLock] = None
+        self._logger = logger or logging.getLogger(__name__)
+
+        # Redis keys
+        self._pool_key = "taskpool:entries"
+        self._pool_metadata_prefix = "taskpool:meta:"
 
     @property
     def _thread_lock(self) -> threading.RLock:
@@ -74,10 +81,97 @@ class TaskPool:
             self._lock = threading.RLock()
         return self._lock
 
+    def _serialize_entry(self, entry: PoolEntry) -> str:
+        """Serialize PoolEntry to JSON string for Redis storage."""
+        return json.dumps({
+            "task_id": entry.task_id,
+            "task": entry.task,
+            "exclude_worker_id": entry.exclude_worker_id,
+            "enqueued_at": entry.enqueued_at,
+            # Store record attributes we need
+            "record_data": {
+                "slo_seconds": getattr(entry.record, "slo_seconds", None),
+                "submitted_ts": getattr(entry.record, "submitted_ts", None),
+                "load": getattr(entry.record, "load", None),
+            }
+        }, default=str)
+
+    def _deserialize_entry(self, data: str, record: Any) -> PoolEntry:
+        """Deserialize JSON string back to PoolEntry."""
+        obj = json.loads(data)
+        return PoolEntry(
+            task_id=obj["task_id"],
+            task=obj["task"],
+            record=record,
+            exclude_worker_id=obj.get("exclude_worker_id"),
+            enqueued_at=obj.get("enqueued_at", time.time())
+        )
+
+    def _get_all_entries(self) -> Dict[str, PoolEntry]:
+        """Retrieve all entries from Redis."""
+        if not self._redis:
+            self._logger.warning(
+                "[TaskPool._get_all_entries] No Redis client available")
+            return {}
+
+        entries: Dict[str, PoolEntry] = {}
+        try:
+            # Get all task_ids from the Redis set
+            task_ids = self._redis.smembers(self._pool_key)
+            self._logger.info(
+                f"[TaskPool._get_all_entries] Found {len(task_ids) if task_ids else 0} task IDs in Redis set '{self._pool_key}'")
+            if not task_ids:
+                return {}
+
+            # Retrieve metadata for each task
+            for task_id in task_ids:
+                meta_key = f"{self._pool_metadata_prefix}{task_id}"
+                data = self._redis.get(meta_key)
+                if data:
+                    try:
+                        # Create a minimal record object for deserialization
+                        obj = json.loads(data)
+                        record_data = obj.get("record_data", {})
+
+                        class MinimalRecord:
+                            def __init__(self, data):
+                                self.slo_seconds = data.get("slo_seconds")
+                                self.submitted_ts = data.get("submitted_ts")
+                                self.load = data.get("load")
+
+                        record = MinimalRecord(record_data)
+                        entry = self._deserialize_entry(data, record)
+                        entries[task_id] = entry
+                    except Exception as e:
+                        self._logger.error(
+                            f"[TaskPool._get_all_entries] Failed to deserialize entry {task_id}: {e}")
+                else:
+                    self._logger.warning(
+                        f"[TaskPool._get_all_entries] No metadata found for task {task_id}")
+        except Exception as e:
+            # Log the error instead of silently failing
+            self._logger.exception(
+                f"[TaskPool._get_all_entries] Critical error retrieving entries: {e}")
+            return {}
+
+        self._logger.info(
+            f"[TaskPool._get_all_entries] Successfully retrieved {len(entries)} entries")
+        return entries
+
     def add(self, entry: PoolEntry) -> List[PoolEntry]:
         """Add an entry and return a batch to dispatch if threshold met."""
         with self._thread_lock:
-            self._entries[entry.task_id] = entry
+            # Store in Redis
+            if self._redis:
+                try:
+                    # Add task_id to the set
+                    self._redis.sadd(self._pool_key, entry.task_id)
+                    # Store entry metadata
+                    meta_key = f"{self._pool_metadata_prefix}{entry.task_id}"
+                    self._redis.set(meta_key, self._serialize_entry(entry))
+                except Exception:
+                    pass  # Continue even if Redis fails
+
             return self._flush_if_needed_locked()
 
     def requeue(self, entries: List[PoolEntry]) -> None:
@@ -85,60 +179,123 @@ class TaskPool:
         if not entries:
             return
         with self._thread_lock:
-            for entry in entries:
-                self._entries[entry.task_id] = entry
+            if self._redis:
+                try:
+                    for entry in entries:
+                        self._redis.sadd(self._pool_key, entry.task_id)
+                        meta_key = f"{self._pool_metadata_prefix}{entry.task_id}"
+                        self._redis.set(meta_key, self._serialize_entry(entry))
+                except Exception:
+                    pass
 
     def pop_due(self) -> List[PoolEntry]:
         """
-        Pop a due batch based on SLO threshold.
+        Pop a due batch based on batch size or SLO threshold.
         Returns at most batch_size entries to avoid burst dispatch.
         """
         with self._thread_lock:
-            if not self._entries:
+            entries = self._get_all_entries()
+            self._logger.info(
+                f"[pop_due] Retrieved {len(entries)} entries from Redis")
+            if not entries:
                 return []
+
+            # Check if batch size threshold is met
+            self._logger.info(
+                f"[pop_due] Batch size check: {len(entries)} >= {self._batch_size}")
+            if len(entries) >= self._batch_size:
+                batch = self._take_n_locked(self._batch_size, entries)
+                self._logger.info(
+                    f"[pop_due] Batch size threshold met, returning {len(batch)} tasks")
+                return batch
+
+            # Check if any entry has reached SLO threshold
             now = time.time()
-            if any(e.slo_progress(now) >= self._slo_fraction for e in self._entries.values()):
-                return self._take_n_locked(self._batch_size)
+            if any(e.slo_progress(now) >= self._slo_fraction for e in entries.values()):
+                batch = self._take_n_locked(self._batch_size, entries)
+                self._logger.info(
+                    f"[pop_due] SLO threshold met, returning {len(batch)} tasks")
+                return batch
+
+            self._logger.info(
+                f"[pop_due] No threshold met, returning empty list")
             return []
 
     def clear_task(self, task_id: str) -> None:
         """Remove a single task from the pool (e.g., after dispatch or cancel)."""
         with self._thread_lock:
-            self._entries.pop(task_id, None)
+            if self._redis:
+                try:
+                    self._redis.srem(self._pool_key, task_id)
+                    meta_key = f"{self._pool_metadata_prefix}{task_id}"
+                    self._redis.delete(meta_key)
+                except Exception:
+                    pass
 
     def has_entries(self) -> bool:
         with self._thread_lock:
-            return bool(self._entries)
+            if self._redis:
+                try:
+                    return self._redis.scard(self._pool_key) > 0
+                except Exception:
+                    return False
+            return False
+
+    def pop_all_pending(self) -> List[PoolEntry]:
+        """
+        Pop ALL pending entries from the pool, regardless of SLO.
+        Used when workers become idle to immediately dispatch waiting tasks.
+        """
+        with self._thread_lock:
+            entries = self._get_all_entries()
+            if not entries:
+                return []
+            return self._take_n_locked(len(entries), entries)
 
     # -------- internals --------
 
     def _flush_if_needed_locked(self) -> List[PoolEntry]:
         """Return a batch if pool-size or SLO threshold is met."""
-        if len(self._entries) >= self._batch_size:
-            return self._take_n_locked(self._batch_size)
+        entries = self._get_all_entries()
+
+        if len(entries) >= self._batch_size:
+            return self._take_n_locked(self._batch_size, entries)
 
         now = time.time()
-        if any(e.slo_progress(now) >= self._slo_fraction for e in self._entries.values()):
-            return self._take_n_locked(self._batch_size)
+        if any(e.slo_progress(now) >= self._slo_fraction for e in entries.values()):
+            return self._take_n_locked(self._batch_size, entries)
 
         return []
 
-    def _take_n_locked(self, n: int) -> List[PoolEntry]:
+    def _take_n_locked(self, n: int, entries: Dict[str, PoolEntry] = None) -> List[PoolEntry]:
         """
         Take at most n entries out of the pool, ordering by:
           1) higher SLO progress first,
           2) earlier submitted_ts next (FIFO within same progress).
         """
-        items = list(self._entries.values())
+        if entries is None:
+            entries = self._get_all_entries()
+
+        items = list(entries.values())
         # Rank by urgency then FIFO; this improves fairness under pressure.
         now = time.time()
         items.sort(
-            key=lambda e: (e.slo_progress(now), -(getattr(e.record, "submitted_ts", e.enqueued_at))),
+            key=lambda e: (e.slo_progress(now), -
+                           (getattr(e.record, "submitted_ts", e.enqueued_at))),
             reverse=True,
         )
         batch = items[:n]
-        for b in batch:
-            self._entries.pop(b.task_id, None)
+
+        # Remove from Redis
+        if self._redis:
+            try:
+                for b in batch:
+                    self._redis.srem(self._pool_key, b.task_id)
+                    meta_key = f"{self._pool_metadata_prefix}{b.task_id}"
+                    self._redis.delete(meta_key)
+            except Exception:
+                pass
+
         return batch
 
     def time_until_threshold(self, slo_fraction: float) -> Optional[float]:
@@ -147,11 +304,12 @@ class TaskPool:
         0.0 is returned if at least one entry already meets/exceeds the fraction.
         """
         with self._thread_lock:
-            if not self._entries:
+            entries = self._get_all_entries()
+            if not entries:
                 return None
             now = time.time()
             min_delay: Optional[float] = None
-            for entry in self._entries.values():
+            for entry in entries.values():
                 slo = getattr(entry.record, "slo_seconds", None)
                 if not slo or slo <= 0:
                     continue
@@ -193,7 +351,7 @@ class TaskPoolManager:
         pending_status: str,
         done_status: str,
     ) -> None:
-        self._pool = TaskPool(batch_size, slo_fraction)
+        self._pool = TaskPool(batch_size, slo_fraction, redis_client, logger)
         self._dispatch_fn = dispatch_fn
         self._logger = logger
         self._rds = redis_client
@@ -204,15 +362,18 @@ class TaskPoolManager:
         self._pending_status = pending_status
         self._done_status = done_status
 
-        self._model_worker_cache: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
+        self._model_worker_cache: "OrderedDict[str, Tuple[str, float]]" = OrderedDict(
+        )
         self._model_queue_counts: Counter[str] = Counter()
         self._model_queue_lock = threading.RLock()
 
         self._flush_lock = threading.RLock()
         self._flush_timer: Optional[threading.Timer] = None
         self._slo_fraction = float(slo_fraction)
-        self._stickiness_ttl = max(0.0, float(os.getenv("MODEL_STICKINESS_TTL_SEC", "180")))
-        self._stickiness_capacity = max(1, int(os.getenv("MODEL_STICKINESS_MAX_ENTRIES", "256")))
+        self._stickiness_ttl = max(0.0, float(
+            os.getenv("MODEL_STICKINESS_TTL_SEC", "180")))
+        self._stickiness_capacity = max(
+            1, int(os.getenv("MODEL_STICKINESS_MAX_ENTRIES", "256")))
 
     # ---- public API ----
 
@@ -224,7 +385,8 @@ class TaskPoolManager:
         *,
         exclude_worker_id: Optional[str] = None,
     ) -> None:
-        entry = PoolEntry(task_id=task_id, task=task, record=record, exclude_worker_id=exclude_worker_id)
+        entry = PoolEntry(task_id=task_id, task=task,
+                          record=record, exclude_worker_id=exclude_worker_id)
         self._update_model_queue_counts([entry], delta=1)
         batch = self._pool.add(entry)
         if batch:
@@ -241,6 +403,21 @@ class TaskPoolManager:
             self._dispatch_batch(batch)
         else:
             self._ensure_flush_timer()
+
+    def flush_all_pending(self) -> None:
+        """
+        Force flush ALL pending tasks from the pool, regardless of SLO.
+        Called when workers become idle to immediately dispatch waiting tasks.
+        """
+        with self._flush_lock:
+            self._flush_timer = None
+
+        batch = self._pool.pop_all_pending()
+        if batch:
+            self._logger.info(
+                "Flushing %d pending tasks due to worker availability", len(batch))
+            self._dispatch_batch(batch)
+        self._ensure_flush_timer()
 
     def clear_task(self, task_id: str) -> None:
         self._pool.clear_task(task_id)
@@ -279,20 +456,42 @@ class TaskPoolManager:
 
     def _dispatch_batch(self, entries: List[PoolEntry]) -> None:
         """Filter, optimize and dispatch the given batch; requeue deferred entries."""
+        self._logger.info(
+            f"[_dispatch_batch] Processing batch of {len(entries)} entries")
         ready_entries: List[PoolEntry] = []
         deferred: List[PoolEntry] = []
 
         for entry in entries:
+            # Get the actual TaskRecord from memory
+            actual_record = self._task_lookup(entry.task_id)
+            if not actual_record:
+                self._logger.warning(
+                    f"[_dispatch_batch] Task {entry.task_id} not found in TASKS dict, skipping")
+                continue
+
+            # Update the entry's record reference to use the actual TaskRecord
+            entry.record = actual_record
+
             if not self._is_dependency_satisfied(entry.task_id):
+                self._logger.info(
+                    f"[_dispatch_batch] Task {entry.task_id} deferred: dependencies not satisfied")
                 deferred.append(entry)
                 continue
-            if not self._is_retry_due(entry.record):
+            if not self._is_retry_due(actual_record):
+                self._logger.info(
+                    f"[_dispatch_batch] Task {entry.task_id} deferred: retry not due yet")
                 deferred.append(entry)
                 continue
-            if getattr(entry.record, "status", None) != self._pending_status:
+            status = getattr(actual_record, "status", None)
+            if status != self._pending_status:
+                self._logger.info(
+                    f"[_dispatch_batch] Task {entry.task_id} deferred: status is {status}, expected {self._pending_status}")
                 deferred.append(entry)
                 continue
             ready_entries.append(entry)
+
+        self._logger.info(
+            f"[_dispatch_batch] Ready: {len(ready_entries)}, Deferred: {len(deferred)}")
 
         if deferred:
             self._pool.requeue(deferred)
@@ -314,7 +513,8 @@ class TaskPoolManager:
                     plan.preferred_worker_id,
                 )
             except Exception as exc:  # pragma: no cover
-                self._logger.warning("Dispatch planning failed for %s: %s", plan.task_id, exc)
+                self._logger.warning(
+                    "Dispatch planning failed for %s: %s", plan.task_id, exc)
 
         self._ensure_flush_timer()
 
@@ -347,7 +547,8 @@ class TaskPoolManager:
         if not inference_entries:
             return plans, inference_entries
 
-        plan_map: Dict[str, DispatchPlan] = {plan.task_id: plan for plan in plans}
+        plan_map: Dict[str, DispatchPlan] = {
+            plan.task_id: plan for plan in plans}
         skip_ids: Set[str] = set()
         pending: Dict[str, PoolEntry] = {}
 
@@ -355,7 +556,8 @@ class TaskPoolManager:
             if entry.task_id in skip_ids:
                 continue
             plan = plan_map.get(entry.task_id)
-            signature = self._merge_signature(plan.parsed if plan else entry.task)
+            signature = self._merge_signature(
+                plan.parsed if plan else entry.task)
             if not signature:
                 continue
             partner = pending.get(signature)
@@ -373,8 +575,10 @@ class TaskPoolManager:
             plan_map.pop(sid, None)
             pool_map.pop(sid, None)
 
-        filtered_plans = [plan for plan in plans if plan.task_id not in skip_ids]
-        remaining_entries = [entry for entry in inference_entries if entry.task_id not in skip_ids]
+        filtered_plans = [
+            plan for plan in plans if plan.task_id not in skip_ids]
+        remaining_entries = [
+            entry for entry in inference_entries if entry.task_id not in skip_ids]
         return filtered_plans, remaining_entries
 
     def _merge_signature(self, task: Dict[str, Any]) -> Optional[str]:
@@ -408,7 +612,8 @@ class TaskPoolManager:
 
         combined_items = list(primary_items) + list(secondary_items)
         combined_spec = copy.deepcopy(primary_plan.parsed)
-        combined_spec.setdefault("spec", {})["data"] = {"type": "list", "items": combined_items}
+        combined_spec.setdefault("spec", {})["data"] = {
+            "type": "list", "items": combined_items}
 
         slices: Dict[str, Tuple[int, int]] = {
             primary_entry.task_id: (0, len(primary_items)),
@@ -451,7 +656,8 @@ class TaskPoolManager:
         try:
             from datasets import load_dataset  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
-            self._logger.warning("Cannot merge dataset-based inference tasks: %s", exc)
+            self._logger.warning(
+                "Cannot merge dataset-based inference tasks: %s", exc)
             return None
 
         name = data.get("name")
@@ -459,7 +665,8 @@ class TaskPoolManager:
         try:
             dataset = load_dataset(source, name=name, split=split)
         except Exception as exc:
-            self._logger.warning("Failed to load dataset %s for merge: %s", source, exc)
+            self._logger.warning(
+                "Failed to load dataset %s for merge: %s", source, exc)
             return None
 
         if data.get("shuffle"):
@@ -469,19 +676,23 @@ class TaskPoolManager:
                 if buffer_size is None:
                     dataset = dataset.shuffle(seed=seed)
                 else:
-                    dataset = dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
+                    dataset = dataset.shuffle(
+                        seed=seed, buffer_size=int(buffer_size))
             except Exception as exc:
-                self._logger.warning("Dataset shuffle failed during merge: %s", exc)
+                self._logger.warning(
+                    "Dataset shuffle failed during merge: %s", exc)
 
         column = data.get("column", "text")
         if column not in dataset.column_names:
-            self._logger.warning("Column %s not found when merging dataset inference tasks", column)
+            self._logger.warning(
+                "Column %s not found when merging dataset inference tasks", column)
             return None
 
         try:
             return [str(value) for value in dataset[column]]
         except Exception as exc:
-            self._logger.warning("Failed to extract dataset column %s for merge: %s", column, exc)
+            self._logger.warning(
+                "Failed to extract dataset column %s for merge: %s", column, exc)
             return None
 
     def _update_merge_state(
@@ -500,7 +711,8 @@ class TaskPoolManager:
                 return False
 
             parent_children = list(parent_rec.merged_children or [])
-            parent_children = [c for c in parent_children if c.get("task_id") != child_id]
+            parent_children = [
+                c for c in parent_children if c.get("task_id") != child_id]
             parent_children.append(
                 {
                     "task_id": child_id,
@@ -548,8 +760,10 @@ class TaskPoolManager:
 
         # 1) Build dispatch plans and cache the eligible worker pools.
         for entry in entries:
-            exclude_ids: Set[str] = {entry.exclude_worker_id} if entry.exclude_worker_id else set()
-            pool = idle_satisfying_pool(self._rds, entry.task, exclude_ids=exclude_ids) or []
+            exclude_ids: Set[str] = {
+                entry.exclude_worker_id} if entry.exclude_worker_id else set()
+            pool = idle_satisfying_pool(
+                self._rds, entry.task, exclude_ids=exclude_ids) or []
             pool_map[entry.task_id] = pool
 
             plans.append(
@@ -564,12 +778,14 @@ class TaskPoolManager:
             if self._is_inference_task(entry.task):
                 inference_entries.append(entry)
 
-        plans, inference_entries = self._apply_inference_merges(plans, pool_map, inference_entries)
+        plans, inference_entries = self._apply_inference_merges(
+            plans, pool_map, inference_entries)
 
         # Keep worker pools that correspond to surviving plans only.
         if plans:
             active_ids = {plan.task_id for plan in plans}
-            pool_map = {task_id: pool_map.get(task_id, []) for task_id in active_ids}
+            pool_map = {task_id: pool_map.get(
+                task_id, []) for task_id in active_ids}
 
         model_counts: Counter[str] = Counter()
         for entry in inference_entries:
@@ -579,17 +795,21 @@ class TaskPoolManager:
         remaining_by_model = Counter(model_counts)
 
         # 2) Co-location when workers are tight: pair tasks sharing common workers
-        available_workers = {w.worker_id for workers in pool_map.values() for w in workers}
+        available_workers = {
+            w.worker_id for workers in pool_map.values() for w in workers}
         worker_shortage = len(available_workers) < len(pool_map)
 
         if worker_shortage and len(inference_entries) >= 2:
-            ordered = sorted(inference_entries, key=lambda e: getattr(e.record, "submitted_ts", 0.0))
+            ordered = sorted(inference_entries, key=lambda e: getattr(
+                e.record, "submitted_ts", 0.0))
             paired: Set[str] = set()
-            candidate_cache: Dict[str, Tuple[List[Worker], Dict[str, Worker]]] = {}
+            candidate_cache: Dict[str,
+                                  Tuple[List[Worker], Dict[str, Worker]]] = {}
             for entry in inference_entries:
                 task_pool = pool_map.get(entry.task_id, [])
                 if task_pool:
-                    candidate_cache[entry.task_id] = (task_pool, {w.worker_id: w for w in task_pool})
+                    candidate_cache[entry.task_id] = (
+                        task_pool, {w.worker_id: w for w in task_pool})
 
             for idx, entry in enumerate(ordered):
                 task_id = entry.task_id
@@ -601,7 +821,7 @@ class TaskPoolManager:
                 workers_a, cand_a = pool_a
                 load_a = getattr(entry.record, "load", 0)
 
-                for other in ordered[idx + 1 :]:
+                for other in ordered[idx + 1:]:
                     other_id = other.task_id
                     if other_id in paired:
                         continue
@@ -880,7 +1100,8 @@ class TaskStore:
     ) -> None:
         if not self._pool_manager:
             raise RuntimeError("Task pool manager is not configured")
-        self._pool_manager.enqueue(task_id, task, record, exclude_worker_id=exclude_worker_id)
+        self._pool_manager.enqueue(
+            task_id, task, record, exclude_worker_id=exclude_worker_id)
 
     def clear_from_pool(self, task_id: str) -> None:
         if self._pool_manager:
@@ -897,6 +1118,11 @@ class TaskStore:
     def flush_pool(self) -> None:
         if self._pool_manager:
             self._pool_manager.flush_due()
+
+    def flush_pool_all(self) -> None:
+        """Force flush all pending tasks, typically when workers become idle."""
+        if self._pool_manager:
+            self._pool_manager.flush_all_pending()
 
     def update_parsed(self, task_id: str, parsed: Dict[str, Any]) -> None:
         with self._lock:
@@ -1011,7 +1237,8 @@ class TaskStore:
 
     def record_dead_letter(self, entry: Dict[str, Any]) -> None:
         payload = dict(entry)
-        payload.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
+        payload.setdefault("recorded_at", datetime.now(
+            timezone.utc).isoformat())
         with self._lock:
             self._dead_letters.append(payload)
             # Keep the list bounded to avoid unbounded memory growth.
@@ -1055,9 +1282,11 @@ class TaskStore:
         with self._lock:
             self._parsed = copy.deepcopy(state.get("parsed", {}))
             depends = state.get("depends", {})
-            self._depends = {task_id: set(items or []) for task_id, items in depends.items()}
+            self._depends = {task_id: set(items or [])
+                             for task_id, items in depends.items()}
             self._released = set(state.get("released", []))
-            self._load = {tid: int(val) for tid, val in (state.get("load") or {}).items()}
+            self._load = {tid: int(val) for tid, val in (
+                state.get("load") or {}).items()}
             self._slo = copy.deepcopy(state.get("slo", {}))
             self._dead_letters = copy.deepcopy(state.get("dead_letters", []))
 
@@ -1070,7 +1299,8 @@ class TaskStore:
                             nested[child_id] = (int(values[0]), int(values[1]))
                 merge_state[parent_id] = nested
             self._merge_slices = merge_state
-            self._merge_parent = {k: v for k, v in (state.get("merge_parent") or {}).items()}
+            self._merge_parent = {k: v for k, v in (
+                state.get("merge_parent") or {}).items()}
 
     def reset_release(self, task_id: str) -> None:
         """Allow a task to be redispatched by clearing its released flag."""

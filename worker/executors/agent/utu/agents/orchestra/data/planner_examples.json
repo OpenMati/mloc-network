@@ -1,34 +1,34 @@
 [
     {
-        "question": "哪位乌兹别克斯坦网球选手赢得了2016年在曲靖举行的首届ITF 2.5万美元赛事单打冠军，他出生于哪一年？",
+        "question": "Which Uzbekistan tennis player won the singles championship at the inaugural ITF $25,000 event held in Qujing in 2016, and what year was he born?",
         "available_agents": [
             {
                 "agent_name": "SearchAgent",
                 "description": "Web search, information retrieval, research material collection, API data fetching"
             }
         ],
-        "analysis": "这个问题需要找出2016年曲靖ITF赛事单打冠军的身份和出生年份。需要分步骤搜索：首先找到赛事信息，然后确认冠军身份，最后获取个人资料。由于涉及具体的赛事年份、地点和选手国籍，需要通过多个搜索步骤来获取准确信息。",
+        "analysis": "This question requires finding the identity and birth year of the 2016 Qujing ITF singles champion. It needs step-by-step searches: first find event information, then confirm champion identity, and finally obtain personal details. Since it involves specific event year, location, and player nationality, accurate information needs to be obtained through multiple search steps.",
         "plan": [
-            {"agent_name": "SearchAgent", "task": "搜索2016年曲靖ITF 2.5万美元网球赛事的相关信息和比赛结果", "completed": false},
-            {"agent_name": "SearchAgent", "task": "查找2016年曲靖ITF 2.5万美元赛事单打冠军获得者的详细信息", "completed": false},
-            {"agent_name": "SearchAgent", "task": "确认单打冠军选手的乌兹别克斯坦国籍身份", "completed": false},
-            {"agent_name": "SearchAgent", "task": "搜索乌兹别克斯坦单打冠军选手的个人资料和出生年份", "completed": false}
+            {"agent_name": "SearchAgent", "task": "Search for information and results related to the 2016 Qujing ITF $25,000 tennis event", "completed": false},
+            {"agent_name": "SearchAgent", "task": "Find detailed information about the 2016 Qujing ITF $25,000 singles champion", "completed": false},
+            {"agent_name": "SearchAgent", "task": "Confirm the Uzbekistan nationality of the singles champion", "completed": false},
+            {"agent_name": "SearchAgent", "task": "Search for personal information and birth year of the Uzbekistan singles champion", "completed": false}
         ]
     },
     {
-        "question": "在20世纪初，南半球发现了一种天文现象，后来由一位在19世纪末加入美国中西部一所著名大学的教授拍摄了照片。同年，一件来自太空的物体在一个美国小镇附近被发现。拍摄该天文现象照片的教授是谁？",
+        "question": "In the early 20th century, an astronomical phenomenon was discovered in the Southern Hemisphere, later photographed by a professor who joined a famous Midwestern American university in the late 19th century. In the same year, an object from space was discovered near a small American town. Who was the professor who photographed this astronomical phenomenon?",
         "available_agents": [
             {
                 "agent_name": "SearchAgent",
                 "description": "Web search, information retrieval, research material collection, API data fetching"
             }
         ],
-        "analysis": "这是一个复杂的历史搜索问题，涉及多个关联信息：20世纪初的南半球天文现象、19世纪末美国中西部大学教授、同年的太空物体发现事件。需要通过多角度搜索来找到这些历史事件的交集，从而确定教授身份。",
+        "analysis": "This is a complex historical search problem involving multiple related pieces of information: an early 20th century Southern Hemisphere astronomical phenomenon, a late 19th century Midwestern American university professor, and a space object discovery event in the same year. Multi-angle searches are needed to find the intersection of these historical events to determine the professor's identity.",
         "plan": [
-            {"agent_name": "SearchAgent", "task": "搜索20世纪初在南半球发现的主要天文现象和相关事件", "completed": false},
-            {"agent_name": "SearchAgent", "task": "查找19世纪末美国中西部著名大学的相关信息和教授名单", "completed": false},
-            {"agent_name": "SearchAgent", "task": "搜索拍摄南半球天文现象照片的美国中西部大学教授信息", "completed": false},
-            {"agent_name": "SearchAgent", "task": "查找20世纪初在美国小镇附近发现的太空物体事件详情", "completed": false}
+            {"agent_name": "SearchAgent", "task": "Search for major astronomical phenomena discovered in the Southern Hemisphere in the early 20th century and related events", "completed": false},
+            {"agent_name": "SearchAgent", "task": "Find information about famous Midwestern American universities in the late 19th century and their professors", "completed": false},
+            {"agent_name": "SearchAgent", "task": "Search for information about the Midwestern American university professor who photographed the Southern Hemisphere astronomical phenomenon", "completed": false},
+            {"agent_name": "SearchAgent", "task": "Find details about the space object discovery event near an American town in the early 20th century", "completed": false}
         ]
     },
     {

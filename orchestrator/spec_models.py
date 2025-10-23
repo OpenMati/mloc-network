@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Pydantic 模型定义，用于规范化并校验任务 YAML 结构。"""
+"""Pydantic model definitions for normalizing and validating task YAML structure."""
 
 from typing import Any, Dict, List, Optional
 
@@ -12,13 +12,13 @@ def _to_str(value: Any) -> str:
 
 
 class MetadataModel(BaseModel):
-    """任务元数据，允许额外字段（annotations、labels 等）。"""
+    """Task metadata, allowing extra fields (annotations, labels, etc.)."""
 
     model_config = ConfigDict(extra="allow")
 
-    name: str = Field(..., description="任务名称，作为唯一标识前缀。")
-    owner: Optional[str] = Field(default=None, description="任务拥有者，可选。")
-    annotations: Dict[str, Any] = Field(default_factory=dict, description="任意键值注释。")
+    name: str = Field(..., description="Task name, serves as unique identifier prefix.")
+    owner: Optional[str] = Field(default=None, description="Task owner, optional.")
+    annotations: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary key-value annotations.")
 
     @field_validator("name")
     @classmethod
@@ -38,12 +38,12 @@ class MetadataModel(BaseModel):
 
 
 class GPUConfig(BaseModel):
-    """GPU 资源配置。当定义该块时必须提供 count。"""
+    """GPU resource configuration. When defined, count must be provided."""
 
     model_config = ConfigDict(extra="allow")
 
-    count: int = Field(..., ge=0, description="GPU 数量，必须为非负整数。")
-    type: Optional[str] = Field(default=None, description="GPU 型号，可选。")
+    count: int = Field(..., ge=0, description="Number of GPUs, must be non-negative integer.")
+    type: Optional[str] = Field(default=None, description="GPU model, optional.")
 
     @field_validator("type")
     @classmethod
@@ -55,13 +55,13 @@ class GPUConfig(BaseModel):
 
 
 class HardwareConfig(BaseModel):
-    """硬件资源需求。"""
+    """Hardware resource requirements."""
 
     model_config = ConfigDict(extra="allow")
 
-    cpu: str = Field(..., description="CPU 配额，例如 '8' 或 '8c'。")
-    memory: str = Field(..., description="内存配额，例如 '32Gi'。")
-    gpu: Optional[GPUConfig] = Field(default=None, description="可选 GPU 配置。")
+    cpu: str = Field(..., description="CPU quota, e.g., '8' or '8c'.")
+    memory: str = Field(..., description="Memory quota, e.g., '32Gi'.")
+    gpu: Optional[GPUConfig] = Field(default=None, description="Optional GPU configuration.")
 
     @field_validator("cpu", "memory")
     @classmethod
@@ -73,35 +73,35 @@ class HardwareConfig(BaseModel):
 
 
 class ResourceConfig(BaseModel):
-    """任务资源配置。"""
+    """Task resource configuration."""
 
     model_config = ConfigDict(extra="allow")
 
-    replicas: int = Field(default=1, ge=1, description="调度副本数量，默认 1。")
-    hardware: HardwareConfig = Field(..., description="硬件配置。")
+    replicas: int = Field(default=1, ge=1, description="Number of scheduling replicas, default 1.")
+    hardware: HardwareConfig = Field(..., description="Hardware configuration.")
 
 
 class ParallelConfig(BaseModel):
-    """并行策略配置。"""
+    """Parallel strategy configuration."""
 
     model_config = ConfigDict(extra="allow")
 
-    enabled: bool = Field(default=False, description="是否启用数据并行。")
-    max_shards: Optional[int] = Field(default=None, ge=1, description="分片数量上限。")
-    strategy: Optional[str] = Field(default=None, description="自定义策略名称。")
+    enabled: bool = Field(default=False, description="Whether to enable data parallelism.")
+    max_shards: Optional[int] = Field(default=None, ge=1, description="Maximum number of shards.")
+    strategy: Optional[str] = Field(default=None, description="Custom strategy name.")
 
 
 class OutputDestination(BaseModel):
-    """输出目标配置，支持 local 与 http。"""
+    """Output destination configuration, supports local and http."""
 
     model_config = ConfigDict(extra="allow")
 
-    type: str = Field(default="local", description="输出类型：local 或 http。")
-    path: Optional[str] = Field(default=None, description="local 模式下的目录或相对路径。")
-    url: Optional[str] = Field(default=None, description="http 模式上传目标 URL。")
-    method: Optional[str] = Field(default="POST", description="HTTP 方法，默认 POST。")
-    headers: Dict[str, Any] = Field(default_factory=dict, description="HTTP 头部配置。")
-    timeoutSec: Optional[float] = Field(default=None, ge=0, description="HTTP 请求超时秒数。")
+    type: str = Field(default="local", description="Output type: local or http.")
+    path: Optional[str] = Field(default=None, description="Directory or relative path in local mode.")
+    url: Optional[str] = Field(default=None, description="Upload target URL in http mode.")
+    method: Optional[str] = Field(default="POST", description="HTTP method, default POST.")
+    headers: Dict[str, Any] = Field(default_factory=dict, description="HTTP headers configuration.")
+    timeoutSec: Optional[float] = Field(default=None, ge=0, description="HTTP request timeout in seconds.")
 
     @field_validator("type")
     @classmethod
@@ -126,12 +126,12 @@ class OutputDestination(BaseModel):
 
 
 class OutputConfig(BaseModel):
-    """输出配置，含目标与 artifact 白名单。"""
+    """Output configuration, including destination and artifact whitelist."""
 
     model_config = ConfigDict(extra="allow")
 
     destination: OutputDestination = Field(default_factory=OutputDestination)
-    artifacts: List[str] = Field(default_factory=list, description="期望产出的工件名称列表。")
+    artifacts: List[str] = Field(default_factory=list, description="List of expected output artifact names.")
 
     @field_validator("artifacts", mode="before")
     @classmethod
@@ -153,18 +153,18 @@ class OutputConfig(BaseModel):
 
 
 class TaskSpecModel(BaseModel):
-    """核心任务规范。"""
+    """Core task specification."""
 
     model_config = ConfigDict(extra="allow")
 
-    taskType: str = Field(..., description="任务类型，例如 inference、rag、sft。")
-    resources: ResourceConfig = Field(..., description="资源与硬件配置。")
-    output: OutputConfig = Field(default_factory=OutputConfig, description="输出配置。")
-    parallel: ParallelConfig = Field(default_factory=ParallelConfig, description="并行配置。")
-    dependsOn: List[str] = Field(default_factory=list, description="上游任务 ID 列表。")
-    sloSeconds: Optional[float] = Field(default=None, gt=0, description="目标时延（秒），可选。")
-    stages: Optional[List[Dict[str, Any]]] = Field(default=None, description="线性阶段定义。")
-    graph: Optional[Dict[str, Any]] = Field(default=None, description="DAG 图定义。")
+    taskType: str = Field(..., description="Task type, e.g., inference, rag, sft.")
+    resources: ResourceConfig = Field(..., description="Resource and hardware configuration.")
+    output: OutputConfig = Field(default_factory=OutputConfig, description="Output configuration.")
+    parallel: ParallelConfig = Field(default_factory=ParallelConfig, description="Parallel configuration.")
+    dependsOn: List[str] = Field(default_factory=list, description="List of upstream task IDs.")
+    sloSeconds: Optional[float] = Field(default=None, gt=0, description="Target latency (seconds), optional.")
+    stages: Optional[List[Dict[str, Any]]] = Field(default=None, description="Linear stage definitions.")
+    graph: Optional[Dict[str, Any]] = Field(default=None, description="DAG graph definition.")
 
     @field_validator("taskType")
     @classmethod
@@ -192,14 +192,14 @@ class TaskSpecModel(BaseModel):
 
 
 class TaskDocumentModel(BaseModel):
-    """完整的任务 YAML 文档模型。"""
+    """Complete task YAML document model."""
 
     model_config = ConfigDict(extra="allow")
 
-    apiVersion: str = Field(..., description="API 版本，例 mloc/v1。")
-    kind: str = Field(..., description="任务种类。")
-    metadata: MetadataModel = Field(..., description="任务元数据。")
-    spec: TaskSpecModel = Field(..., description="任务规范。")
+    apiVersion: str = Field(..., description="API version, e.g., mloc/v1.")
+    kind: str = Field(..., description="Task kind.")
+    metadata: MetadataModel = Field(..., description="Task metadata.")
+    spec: TaskSpecModel = Field(..., description="Task specification.")
 
     @field_validator("apiVersion", "kind")
     @classmethod
@@ -211,7 +211,7 @@ class TaskDocumentModel(BaseModel):
 
 
 def format_validation_error(exc: ValidationError) -> str:
-    """将 Pydantic ValidationError 转换为可读的错误消息。"""
+    """Convert Pydantic ValidationError to readable error message."""
 
     def _format_loc(parts: List[Any]) -> str:
         formatted: List[str] = []

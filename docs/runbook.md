@@ -1,49 +1,49 @@
-# MLOC Runbook（2025-10-09，编写者：Codex）
+# MLOC Runbook (2025-10-09, Author: Codex)
 
-## 启动顺序
-1. **Redis**：`redis-server`，确保 `REDIS_URL` 指向可访问的实例。
-2. **Orchestrator**：
+## Startup Sequence
+1. **Redis**: `redis-server`, ensure `REDIS_URL` points to an accessible instance.
+2. **Orchestrator**:
    ```bash
    export REDIS_URL="redis://localhost:6379/0"
    export ORCHESTRATOR_STATE_DIR=./state
    python orchestrator/main.py
    ```
-3. **Worker**（按需多实例）：
+3. **Worker** (multiple instances as needed):
    ```bash
    export RESULTS_DIR=./results_workers
-   pip install mloc[inference]  # 或根据需求安装其它 extras
+   pip install mloc[inference]  # Or install other extras as needed
    python worker/main.py
    ```
 
-> 使用 Docker Compose 时，可运行 `docker compose up`，编排脚本会自动安装依赖并挂载 `./data/` 目录以保存状态与结果。
+> When using Docker Compose, run `docker compose up`, the orchestration script will automatically install dependencies and mount the `./data/` directory to save state and results.
 
-## 状态与恢复
-- 快照写入 `${ORCHESTRATOR_STATE_DIR}/task_state.json`，重启时会自动恢复任务池、父子分片与 TaskRecord 状态。
-- 指标写入 `${ORCHESTRATOR_STATE_DIR}/metrics/metrics.json`，原始事件记录在 `events.log`。
-- 若需强制清理，可安全删除 `state/` 目录后重启，系统会从空白状态启动。
+## State and Recovery
+- Snapshots are written to `${ORCHESTRATOR_STATE_DIR}/task_state.json`, on restart the task pool, parent-child shards, and TaskRecord state are automatically recovered.
+- Metrics are written to `${ORCHESTRATOR_STATE_DIR}/metrics/metrics.json`, raw events are recorded in `events.log`.
+- For forced cleanup, safely delete the `state/` directory and restart, the system will start from a blank state.
 
-## 常用诊断
-| 目标 | 命令 |
+## Common Diagnostics
+| Target | Command |
 | ---- | ---- |
-| 浏览指标 | `curl http://127.0.0.1:8000/metrics` |
-| 查看 manifest | `cat results_host/<task_id>/manifest.json` |
-| 检查死信 | `curl http://127.0.0.1:8000/api/v1/dead_letters` |
-| 快速重队任务 | `curl -X POST http://127.0.0.1:8000/admin/cleanup` |
+| View metrics | `curl http://127.0.0.1:8000/metrics` |
+| Check manifest | `cat results_host/<task_id>/manifest.json` |
+| Check dead letters | `curl http://127.0.0.1:8000/api/v1/dead_letters` |
+| Quick requeue task | `curl -X POST http://127.0.0.1:8000/admin/cleanup` |
 
-## 验证脚本
-- `scripts/validate_echo_local.sh`：验证本地结果落盘（EchoExecutor + Local output）。
-- `scripts/validate_echo_http.sh`：验证 HTTP 回传与 orchestrator 聚合。
-- 两者依赖 `ORCHESTRATOR_URL` 与 `ORCHESTRATOR_TOKEN` 环境变量，更多选项可参考 `scripts/worker_validate.py --help`。
-- `scripts/replay_task.py`：根据 `task_state.json` 重放指定 `task_id`。
-- `scripts/export_results.py` / `scripts/task_profile_report.py`：导出 `responses.json` 并生成任务画像报告。
+## Validation Scripts
+- `scripts/validate_echo_local.sh`: Validate local result persistence (EchoExecutor + Local output).
+- `scripts/validate_echo_http.sh`: Validate HTTP upload and orchestrator aggregation.
+- Both depend on `ORCHESTRATOR_URL` and `ORCHESTRATOR_TOKEN` environment variables, see `scripts/worker_validate.py --help` for more options.
+- `scripts/replay_task.py`: Replay specified `task_id` based on `task_state.json`.
+- `scripts/export_results.py` / `scripts/task_profile_report.py`: Export `responses.json` and generate task profile report.
 
-## 故障排查提示
-- **任务卡住**：检查 `/metrics` 中 `tasks_requeued` 计数与 `dead_letters` API，确认是否超出重试上限。
-- **工件缺失**：核对 manifest 中 `status == "missing"` 的条目，并检查执行器是否安装了正确的 extras。
-- **Worker 离线**：`metrics.json` 的 `active_workers` 为空时，查看 `metrics/events.log` 判断最后一次心跳时间，同时确保 Redis 权限和网络正常。
+## Troubleshooting Tips
+- **Task stuck**: Check `tasks_requeued` count in `/metrics` and `dead_letters` API to confirm if retry limit exceeded.
+- **Missing artifacts**: Review manifest entries with `status == "missing"` and check if executor has correct extras installed.
+- **Worker offline**: When `active_workers` in `metrics.json` is empty, check `metrics/events.log` for last heartbeat time, and ensure Redis permissions and network are normal.
 
-## 例行维护
-- 建议定期备份 `state/` 与 `results_host/`，便于灾难恢复。
-- 清理旧任务：删除相应目录后运行 `curl -X POST /admin/cleanup`，以移除无效 worker 关联。
-- 升级依赖：根据需要运行 `pip install --upgrade mloc[<extras>]`，升级前请阅读 `docs/executors.md` 了解依赖分层。
-- 使用 Docker Compose 升级：更新代码后执行 `docker compose build --no-cache` 以重新安装依赖。
+## Routine Maintenance
+- Recommend periodic backups of `state/` and `results_host/` for disaster recovery.
+- Clean up old tasks: Delete corresponding directories then run `curl -X POST /admin/cleanup` to remove invalid worker associations.
+- Upgrade dependencies: Run `pip install --upgrade mloc[<extras>]` as needed, read `docs/executors.md` for dependency layers before upgrading.
+- Upgrade with Docker Compose: After code updates, run `docker compose build --no-cache` to reinstall dependencies.

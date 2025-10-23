@@ -144,8 +144,8 @@ class LoRASFTExecutor(Executor):
                 deepspeed=deepspeed_config,
             )
 
-            # 使用原生 SFTTrainer，兼容不同版本参数(tokenizer / processing_class)
-            from trl import SFTTrainer  # 局部导入避免循环
+            # Use native SFTTrainer, compatible with different version parameters (tokenizer / processing_class)
+            from trl import SFTTrainer  # Local import to avoid circular dependency
             trainer = None
             tried_errors = []
             for variant in ("tokenizer", "processing_class", "none"):

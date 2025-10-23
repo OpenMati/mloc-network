@@ -41,7 +41,10 @@ class Worker(BaseModel):
     env: Dict[str, Any] = Field(default_factory=dict)
     hardware: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
-    last_seen: Optional[str] = None         # ISO timestamp of last status update
+    task_types: List[str] = Field(default_factory=list)  # Supported task types
+    description: str = Field(default="")  # Worker description
+    # ISO timestamp of last status update
+    last_seen: Optional[str] = None
 
 
 # ------------------------------------------------------------------------------
@@ -84,6 +87,7 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
     env = _loads(h.get("env_json"), {})
     hardware = _loads(h.get("hardware_json"), {})
     tags = _loads(h.get("tags_json"), [])
+    task_types = _loads(h.get("task_types_json"), [])
 
     pid_val = h.get("pid")
     try:
@@ -99,6 +103,8 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
         env=env,
         hardware=hardware,
         tags=tags,
+        task_types=task_types,
+        description=h.get("description", ""),
         last_seen=h.get("last_seen") or None,
     )
 
@@ -134,7 +140,8 @@ def update_worker_status(rds, worker_id: str, status: str) -> None:
         "ts": now,
     }
     with rds.pipeline() as p:
-        p.hset(r_worker_key(worker_id), mapping={"status": status, "last_seen": now})
+        p.hset(r_worker_key(worker_id), mapping={
+               "status": status, "last_seen": now})
         p.publish("workers.events", json.dumps(payload, ensure_ascii=False))
         p.execute()
 
@@ -207,9 +214,12 @@ def _hw_satisfies(worker: Worker, task: Dict[str, Any]) -> bool:
         return False
 
     # ---- Memory check ----
-    mem_req = parse_mem_to_bytes(str(safe_get(task, "spec.resources.hardware.memory", "0"))) or 0
-    mem_have = int(safe_get(hw, "memory.total_bytes", 0) or 0)
-    if mem_have and mem_req and mem_have < mem_req:
+    mem_req = parse_mem_to_bytes(
+        str(safe_get(task, "spec.resources.hardware.memory", "0"))) or 0
+    mem_have_raw = safe_get(hw, "memory.total_bytes", 0)
+    mem_have = int(mem_have_raw) if mem_have_raw is not None else 0
+    # Only reject if worker advertises memory AND it's insufficient
+    if mem_have > 0 and mem_req > 0 and mem_have < mem_req:
         logger.debug("Reject %s: memory total_bytes have=%s < req=%s",
                      worker.worker_id, mem_have, mem_req)
         return False
@@ -224,9 +234,11 @@ def _hw_satisfies(worker: Worker, task: Dict[str, Any]) -> bool:
 
     # Preferred forms
     gpu_info = safe_get(hw, "gpu", {}) or {}
-    gpus_detailed = safe_get(gpu_info, "gpus", []) or safe_get(hw, "gpus", []) or []
+    gpus_detailed = safe_get(
+        gpu_info, "gpus", []) or safe_get(hw, "gpus", []) or []
 
-    have_count, have_types = _extract_gpu_inventory(gpu_info, gpus_detailed, hw)
+    have_count, have_types = _extract_gpu_inventory(
+        gpu_info, gpus_detailed, hw)
 
     # Count check
     if want_count and have_count < want_count:
@@ -249,6 +261,7 @@ def _hw_satisfies(worker: Worker, task: Dict[str, Any]) -> bool:
 # ------------------------------------------------------------------------------
 
 _INT_RE = re.compile(r"-?\d+")
+
 
 def _parse_int(v: Any) -> int:
     """
@@ -311,6 +324,7 @@ def _gpu_type_matches(want_type: str, have_types: List[str]) -> bool:
     want = want_type.lower()
     for t in have_types:
         t = (t or "").lower()
-        if want in t or t in want:  # allow both directions (A100 vs NVIDIA A100)
+        # allow both directions (A100 vs NVIDIA A100)
+        if want in t or t in want:
             return True
     return False

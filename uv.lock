@@ -1808,10 +1808,12 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "pytest" },
+    { name = "python-socks" },
     { name = "pyyaml" },
     { name = "redis" },
     { name = "requests" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1904,6 +1906,7 @@ requires-dist = [
     { name = "psycopg2-binary", marker = "extra == 'analytics'", specifier = ">=2.9.10" },
     { name = "pymupdf", marker = "extra == 'analytics'", specifier = ">=1.25.3" },
     { name = "pytest", specifier = ">=8.4.2" },
+    { name = "python-socks", specifier = ">=2.7.2" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qdrant-client", marker = "extra == 'rag'", specifier = ">=1.15.1" },
     { name = "redis", specifier = ">=6.4.0" },
@@ -1917,6 +1920,7 @@ requires-dist = [
     { name = "trl", marker = "extra == 'training'", specifier = "==0.23.0" },
     { name = "uvicorn", specifier = ">=0.35.0" },
     { name = "vllm", marker = "extra == 'inference'", specifier = ">=0.10.1.1" },
+    { name = "websockets", specifier = ">=14.0" },
     { name = "wikipedia-api", marker = "extra == 'agent'", specifier = ">=0.8.1" },
 ]
 provides-extras = ["inference", "training", "rag", "agent", "analytics", "observability"]
@@ -3548,6 +3552,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/87/f44d7c9f274c7ee665a29b885ec97089ec5dc034c7f3fafa03da9e39a09e/python_multipart-0.0.20.tar.gz", hash = "sha256:8dd0cab45b8e23064ae09147625994d090fa46f5b0d1e13af944c331a7fa9d13", size = 37158, upload-time = "2024-12-16T19:45:46.972Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/45/58/38b5afbc1a800eeea951b9285d3912613f2603bdf897a4ab0f4bd7f405fc/python_multipart-0.0.20-py3-none-any.whl", hash = "sha256:8a62d3a8335e06589fe01f2a3e178cdcc632f3fbe0d492ad9ee0ec35aab1f104", size = 24546, upload-time = "2024-12-16T19:45:44.423Z" },
+]
+
+[[package]]
+name = "python-socks"
+version = "2.7.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c0/fb/49fc4c3d61dbc8404879bed6c94c0595e654951ac9145645b057c4883966/python_socks-2.7.2.tar.gz", hash = "sha256:4c845d4700352bc7e7382f302dfc6baf0af0de34d2a6d70ba356b2539d4dbb62", size = 229950, upload-time = "2025-08-01T06:47:05.488Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8d/e6/1fdebffa733e79e67b43ee8930e4e5049eb51eae3608caeafc83518798aa/python_socks-2.7.2-py3-none-any.whl", hash = "sha256:d311aefbacc0ddfaa1fa1c32096c436d4fe75b899c24d78e677e1b0623c52c48", size = 55048, upload-time = "2025-08-01T06:47:03.734Z" },
 ]
 
 [[package]]
