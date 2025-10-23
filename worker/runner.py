@@ -23,6 +23,7 @@ class Runner:
         default_executor: Any,
         logger: Any,
         use_websocket: bool = False,
+        orchestrator_url: Optional[str] = None,
     ):
         self.lifecycle = lifecycle
         self.redis = rds  # Can be None in WebSocket-only mode
@@ -32,6 +33,7 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
         self.use_websocket = use_websocket
+        self.orchestrator_url = orchestrator_url
 
     def _resolve_output_dir(self, task_id: str, task: Dict[str, Any]) -> Path:
         """Pick the destination directory for task outputs.
@@ -71,23 +73,32 @@ class Runner:
         self._maybe_emit_http(task_id, task, result)
 
     def _maybe_emit_http(self, task_id: str, task: Dict[str, Any], result: Dict[str, Any]) -> None:
-        """Send task results to an HTTP endpoint when requested by the spec."""
+        """Send task results to an HTTP endpoint when requested by the spec or orchestrator_url is configured."""
         spec = (task or {}).get("spec") or {}
         output_cfg = spec.get("output") or {}
         destination = output_cfg.get("destination") or {}
 
         dest_type = str(destination.get("type") or "local").lower()
-        if dest_type != "http":
+        
+        # If destination type is explicitly http, use spec configuration
+        if dest_type == "http":
+            url = destination.get("url")
+            if not url:
+                raise RuntimeError(
+                    "spec.output.destination.url is required when type is 'http'")
+            method = str(destination.get("method") or "POST").upper()
+            headers = destination.get("headers") or {}
+            timeout = float(destination.get("timeoutSec") or 15)
+        # Otherwise, if orchestrator_url is configured, use it as default
+        elif self.orchestrator_url:
+            url = f"{self.orchestrator_url.rstrip('/')}/api/v1/results"
+            method = "POST"
+            headers = {}
+            timeout = 15.0
+            self.logger.debug("Using default orchestrator URL for result submission: %s", url)
+        else:
+            # No HTTP destination configured and no orchestrator_url, skip HTTP submission
             return
-
-        url = destination.get("url")
-        if not url:
-            raise RuntimeError(
-                "spec.output.destination.url is required when type is 'http'")
-
-        method = str(destination.get("method") or "POST").upper()
-        headers = destination.get("headers") or {}
-        timeout = float(destination.get("timeoutSec") or 15)
 
         # Get worker_id from transport (supports both Redis and WebSocket)
         worker_id = getattr(self.lifecycle.transport, 'worker_id', None)

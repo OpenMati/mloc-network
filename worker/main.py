@@ -139,6 +139,7 @@ def main():
         default_executor,
         logger,
         use_websocket=cfg.use_websocket,
+        orchestrator_url=cfg.orchestrator_url,
     )
     try:
         runner.start()
