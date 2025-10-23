@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import copy
 import json
+import logging
 import threading
 import time
 import uuid
@@ -63,11 +64,12 @@ class TaskPool:
       - any entry's SLO progress crosses the configured threshold.
     """
 
-    def __init__(self, batch_size: int, slo_fraction: float, redis_client=None) -> None:
+    def __init__(self, batch_size: int, slo_fraction: float, redis_client=None, logger=None) -> None:
         self._batch_size = max(1, int(batch_size))
         self._slo_fraction = max(0.0, float(slo_fraction))
         self._redis = redis_client
         self._lock: Optional[threading.RLock] = None
+        self._logger = logger or logging.getLogger(__name__)
 
         # Redis keys
         self._pool_key = "taskpool:entries"
@@ -108,12 +110,16 @@ class TaskPool:
     def _get_all_entries(self) -> Dict[str, PoolEntry]:
         """Retrieve all entries from Redis."""
         if not self._redis:
+            self._logger.warning(
+                "[TaskPool._get_all_entries] No Redis client available")
             return {}
 
         entries: Dict[str, PoolEntry] = {}
         try:
             # Get all task_ids from the Redis set
             task_ids = self._redis.smembers(self._pool_key)
+            self._logger.info(
+                f"[TaskPool._get_all_entries] Found {len(task_ids) if task_ids else 0} task IDs in Redis set '{self._pool_key}'")
             if not task_ids:
                 return {}
 
@@ -122,23 +128,34 @@ class TaskPool:
                 meta_key = f"{self._pool_metadata_prefix}{task_id}"
                 data = self._redis.get(meta_key)
                 if data:
-                    # Create a minimal record object for deserialization
-                    obj = json.loads(data)
-                    record_data = obj.get("record_data", {})
+                    try:
+                        # Create a minimal record object for deserialization
+                        obj = json.loads(data)
+                        record_data = obj.get("record_data", {})
 
-                    class MinimalRecord:
-                        def __init__(self, data):
-                            self.slo_seconds = data.get("slo_seconds")
-                            self.submitted_ts = data.get("submitted_ts")
-                            self.load = data.get("load")
+                        class MinimalRecord:
+                            def __init__(self, data):
+                                self.slo_seconds = data.get("slo_seconds")
+                                self.submitted_ts = data.get("submitted_ts")
+                                self.load = data.get("load")
 
-                    record = MinimalRecord(record_data)
-                    entry = self._deserialize_entry(data, record)
-                    entries[task_id] = entry
+                        record = MinimalRecord(record_data)
+                        entry = self._deserialize_entry(data, record)
+                        entries[task_id] = entry
+                    except Exception as e:
+                        self._logger.error(
+                            f"[TaskPool._get_all_entries] Failed to deserialize entry {task_id}: {e}")
+                else:
+                    self._logger.warning(
+                        f"[TaskPool._get_all_entries] No metadata found for task {task_id}")
         except Exception as e:
-            # Fallback to empty dict on error
-            pass
+            # Log the error instead of silently failing
+            self._logger.exception(
+                f"[TaskPool._get_all_entries] Critical error retrieving entries: {e}")
+            return {}
 
+        self._logger.info(
+            f"[TaskPool._get_all_entries] Successfully retrieved {len(entries)} entries")
         return entries
 
     def add(self, entry: PoolEntry) -> List[PoolEntry]:
@@ -173,16 +190,35 @@ class TaskPool:
 
     def pop_due(self) -> List[PoolEntry]:
         """
-        Pop a due batch based on SLO threshold.
+        Pop a due batch based on batch size or SLO threshold.
         Returns at most batch_size entries to avoid burst dispatch.
         """
         with self._thread_lock:
             entries = self._get_all_entries()
+            self._logger.info(
+                f"[pop_due] Retrieved {len(entries)} entries from Redis")
             if not entries:
                 return []
+
+            # Check if batch size threshold is met
+            self._logger.info(
+                f"[pop_due] Batch size check: {len(entries)} >= {self._batch_size}")
+            if len(entries) >= self._batch_size:
+                batch = self._take_n_locked(self._batch_size, entries)
+                self._logger.info(
+                    f"[pop_due] Batch size threshold met, returning {len(batch)} tasks")
+                return batch
+
+            # Check if any entry has reached SLO threshold
             now = time.time()
             if any(e.slo_progress(now) >= self._slo_fraction for e in entries.values()):
-                return self._take_n_locked(self._batch_size, entries)
+                batch = self._take_n_locked(self._batch_size, entries)
+                self._logger.info(
+                    f"[pop_due] SLO threshold met, returning {len(batch)} tasks")
+                return batch
+
+            self._logger.info(
+                f"[pop_due] No threshold met, returning empty list")
             return []
 
     def clear_task(self, task_id: str) -> None:
@@ -315,7 +351,7 @@ class TaskPoolManager:
         pending_status: str,
         done_status: str,
     ) -> None:
-        self._pool = TaskPool(batch_size, slo_fraction, redis_client)
+        self._pool = TaskPool(batch_size, slo_fraction, redis_client, logger)
         self._dispatch_fn = dispatch_fn
         self._logger = logger
         self._rds = redis_client
@@ -420,20 +456,42 @@ class TaskPoolManager:
 
     def _dispatch_batch(self, entries: List[PoolEntry]) -> None:
         """Filter, optimize and dispatch the given batch; requeue deferred entries."""
+        self._logger.info(
+            f"[_dispatch_batch] Processing batch of {len(entries)} entries")
         ready_entries: List[PoolEntry] = []
         deferred: List[PoolEntry] = []
 
         for entry in entries:
+            # Get the actual TaskRecord from memory
+            actual_record = self._task_lookup(entry.task_id)
+            if not actual_record:
+                self._logger.warning(
+                    f"[_dispatch_batch] Task {entry.task_id} not found in TASKS dict, skipping")
+                continue
+
+            # Update the entry's record reference to use the actual TaskRecord
+            entry.record = actual_record
+
             if not self._is_dependency_satisfied(entry.task_id):
+                self._logger.info(
+                    f"[_dispatch_batch] Task {entry.task_id} deferred: dependencies not satisfied")
                 deferred.append(entry)
                 continue
-            if not self._is_retry_due(entry.record):
+            if not self._is_retry_due(actual_record):
+                self._logger.info(
+                    f"[_dispatch_batch] Task {entry.task_id} deferred: retry not due yet")
                 deferred.append(entry)
                 continue
-            if getattr(entry.record, "status", None) != self._pending_status:
+            status = getattr(actual_record, "status", None)
+            if status != self._pending_status:
+                self._logger.info(
+                    f"[_dispatch_batch] Task {entry.task_id} deferred: status is {status}, expected {self._pending_status}")
                 deferred.append(entry)
                 continue
             ready_entries.append(entry)
+
+        self._logger.info(
+            f"[_dispatch_batch] Ready: {len(ready_entries)}, Deferred: {len(deferred)}")
 
         if deferred:
             self._pool.requeue(deferred)
