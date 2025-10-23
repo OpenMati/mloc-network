@@ -24,7 +24,7 @@ def test_base_executor():
     print("Testing BaseExecutor...")
 
     class TestExecutor(BaseExecutor):
-        name = "test-executor"
+        taskType = "test-executor"
         description = "Test executor"
         version = "1.0.0"
 
@@ -32,7 +32,7 @@ def test_base_executor():
             return {"status": "success"}
 
     executor = TestExecutor()
-    assert executor.name == "test-executor"
+    assert executor.taskType == "test-executor"
     assert executor.version == "1.0.0"
 
     # Test execution
@@ -87,12 +87,12 @@ def test_decorator_executor():
     """Test decorator-based executor."""
     print("Testing @executor decorator...")
 
-    @executor(name="test-decorator", description="Test", version="1.0.0")
+    @executor(taskType="test-decorator", description="Test", version="1.0.0")
     def test_func(task_spec, output_dir):
         return {"decorator": "works"}
 
-    assert hasattr(test_func, 'name')
-    assert test_func.name == "test-decorator"
+    assert hasattr(test_func, 'taskType')
+    assert test_func.taskType == "test-decorator"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         result = test_func.execute({"test": "data"}, Path(tmpdir))
@@ -137,13 +137,13 @@ def test_worker_sdk():
     print("Testing WorkerSDK...")
 
     class TestExecutor1(BaseExecutor):
-        name = "test-1"
+        taskType = "test-1"
 
         def execute(self, task_spec, output_dir):
             return {"id": 1}
 
     class TestExecutor2(BaseExecutor):
-        name = "test-2"
+        taskType = "test-2"
 
         def execute(self, task_spec, output_dir):
             return {"id": 2}
@@ -167,14 +167,14 @@ def test_worker_sdk():
         # Test retrieval
         exec1 = sdk.get_executor("test-1")
         assert exec1 is not None
-        assert exec1.name == "test-1"
+        assert exec1.taskType == "test-1"
 
         exec2 = sdk.get_executor("test-2")
         assert exec2 is not None
-        assert exec2.name == "test-2"
+        assert exec2.taskType == "test-2"
 
         # Test default executor
-        assert sdk._default_executor.name == "test-2"
+        assert sdk._default_executor.taskType == "test-2"
 
     print("✓ WorkerSDK test passed")
 

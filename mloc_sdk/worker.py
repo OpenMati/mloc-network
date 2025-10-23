@@ -123,21 +123,21 @@ class WorkerSDK:
             raise TypeError(
                 f"Executor must be instance of BaseExecutor, got {type(executor)}")
 
-        if executor.name in self._executors:
+        if executor.taskType in self._executors:
             self.logger.warning(
-                "Overwriting existing executor: %s", executor.name
+                "Overwriting existing executor: %s", executor.taskType
             )
 
-        self._executors[executor.name] = executor
+        self._executors[executor.taskType] = executor
         self.logger.info(
             "Registered executor: %s (version: %s)",
-            executor.name,
+            executor.taskType,
             executor.version
         )
 
         if as_default or not self._default_executor:
             self._default_executor = executor
-            self.logger.info("Set default executor: %s", executor.name)
+            self.logger.info("Set default executor: %s", executor.taskType)
 
         return self
 
@@ -195,7 +195,7 @@ class WorkerSDK:
             # Use first registered executor as default
             self._default_executor = next(iter(self._executors.values()))
             self.logger.info("Using %s as default executor",
-                             self._default_executor.name)
+                             self._default_executor.taskType)
 
         self.logger.info("Starting worker with %d executor(s): %s",
                          len(self._executors), ", ".join(self._executors.keys()))
@@ -235,6 +235,10 @@ class WorkerSDK:
             websocket_client=self._ws_client,
         )
 
+        # Auto-detect task types from registered executors
+        task_types = list(self._executors.keys())
+        self.logger.info("Auto-detected task types from executors: %s", task_types)
+
         # Set up callback to start lifecycle after WebSocket connects
         if self._ws_client:
             hw_info = collect_hw()
@@ -242,9 +246,14 @@ class WorkerSDK:
                 self._ws_client, '_on_connect_callback', None)
 
             def on_connect_with_lifecycle():
-                # Start lifecycle (sends REGISTER event)
-                self._lifecycle.start(env={}, hardware=hw_info, tags=self.tags)
-                self.logger.info("Worker lifecycle started")
+                # Start lifecycle (sends REGISTER event with task_types)
+                self._lifecycle.start(
+                    env={}, 
+                    hardware=hw_info, 
+                    tags=self.tags,
+                    task_types=task_types
+                )
+                self.logger.info("Worker lifecycle started with task_types: %s", task_types)
                 # Call original callback if exists
                 if original_on_connect and callable(original_on_connect):
                     original_on_connect()

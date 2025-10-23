@@ -16,7 +16,7 @@ from mloc_sdk.base import BaseExecutor, ExecutorConfig
 
 
 def executor(
-    name: str,
+    taskType: str,
     description: str = "",
     version: str = "1.0.0",
     requires_gpu: bool = False,
@@ -28,7 +28,7 @@ def executor(
     a dictionary result.
 
     Args:
-        name: Executor name (used for taskType)
+        taskType: Executor task type identifier
         description: Human-readable description
         version: Version string
         requires_gpu: Whether GPU is required
@@ -40,7 +40,7 @@ def executor(
         ```python
         from mloc_sdk import executor, WorkerSDK
 
-        @executor(name="math-calculator", description="Does math")
+        @executor(taskType="math-calculator", description="Does math")
         def calculate(task_spec, output_dir):
             a = task_spec.get("a", 0)
             b = task_spec.get("b", 0)
@@ -64,7 +64,7 @@ def executor(
         class DecoratedExecutor(BaseExecutor):
             pass
 
-        DecoratedExecutor.name = name
+        DecoratedExecutor.taskType = taskType
         DecoratedExecutor.description = description or func.__doc__ or ""
         DecoratedExecutor.version = version
         DecoratedExecutor.requires_gpu = requires_gpu
@@ -82,7 +82,7 @@ def executor(
 
 
 def async_executor(
-    name: str,
+    taskType: str,
     description: str = "",
     version: str = "1.0.0",
     requires_gpu: bool = False,
@@ -94,7 +94,7 @@ def async_executor(
     and return a dictionary result.
 
     Args:
-        name: Executor name (used for taskType)
+        taskType: Executor task type identifier
         description: Human-readable description
         version: Version string
         requires_gpu: Whether GPU is required
@@ -107,7 +107,7 @@ def async_executor(
         from mloc_sdk import async_executor, WorkerSDK
         import asyncio
 
-        @async_executor(name="async-processor")
+        @async_executor(taskType="async-processor")
         async def process_async(task_spec, output_dir):
             await asyncio.sleep(1)  # Simulate async work
             return {"status": "completed"}
@@ -129,7 +129,7 @@ def async_executor(
         class AsyncDecoratedExecutor(BaseExecutor):
             pass
 
-        AsyncDecoratedExecutor.name = name
+        AsyncDecoratedExecutor.taskType = taskType
         AsyncDecoratedExecutor.description = description or func.__doc__ or ""
         AsyncDecoratedExecutor.version = version
         AsyncDecoratedExecutor.requires_gpu = requires_gpu
@@ -154,7 +154,7 @@ def async_executor(
 
 
 def stateful_executor(
-    name: str,
+    taskType: str,
     description: str = "",
     version: str = "1.0.0",
     requires_gpu: bool = False,
@@ -166,7 +166,7 @@ def stateful_executor(
     will be preserved between executions, allowing state to be maintained.
 
     Args:
-        name: Executor name (used for taskType)
+        taskType: Executor task type identifier
         description: Human-readable description
         version: Version string
         requires_gpu: Whether GPU is required
@@ -178,7 +178,7 @@ def stateful_executor(
         ```python
         from mloc_sdk import stateful_executor, WorkerSDK
 
-        @stateful_executor(name="counter", description="Counts executions")
+        @stateful_executor(taskType="counter", description="Counts executions")
         class Counter:
             def __init__(self):
                 self.count = 0
@@ -204,7 +204,7 @@ def stateful_executor(
         class StatefulExecutor(BaseExecutor):
             pass
 
-        StatefulExecutor.name = name
+        StatefulExecutor.taskType = taskType
         StatefulExecutor.description = description or cls.__doc__ or ""
         StatefulExecutor.version = version
         StatefulExecutor.requires_gpu = requires_gpu

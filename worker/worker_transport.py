@@ -30,6 +30,7 @@ class WorkerTransport(ABC):
         hardware: Dict[str, Any],
         tags: List[str],
         *,
+        task_types: Optional[List[str]] = None,
         cost_per_hour: float,
         power_metrics: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -115,6 +116,7 @@ class RedisTransport(WorkerTransport):
         hardware: Dict[str, Any],
         tags: List[str],
         *,
+        task_types: Optional[List[str]] = None,
         cost_per_hour: float,
         power_metrics: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -126,6 +128,7 @@ class RedisTransport(WorkerTransport):
             "env_json": json.dumps(env, ensure_ascii=False),
             "hardware_json": json.dumps(hardware, ensure_ascii=False),
             "tags_json": json.dumps(tags, ensure_ascii=False),
+            "task_types_json": json.dumps(task_types or [], ensure_ascii=False),
             "last_seen": started_at,
             "cost_per_hour": f"{cost_per_hour}",
         }
@@ -136,6 +139,7 @@ class RedisTransport(WorkerTransport):
                 "env": env,
                 "hardware": hardware,
                 "cost_per_hour": cost_per_hour,
+                "task_types": task_types or [],
             }
             if power_metrics:
                 payload["power_metrics"] = power_metrics
@@ -358,6 +362,7 @@ class WebSocketTransport(WorkerTransport):
         hardware: Dict[str, Any],
         tags: List[str],
         *,
+        task_types: Optional[List[str]] = None,
         cost_per_hour: float,
         power_metrics: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -370,6 +375,7 @@ class WebSocketTransport(WorkerTransport):
             "env": env,
             "hardware": hardware,
             "tags": tags,
+            "task_types": task_types or [],
             "cost_per_hour": cost_per_hour,
         }
 
@@ -377,6 +383,7 @@ class WebSocketTransport(WorkerTransport):
             "env": env,
             "hardware": hardware,
             "cost_per_hour": cost_per_hour,
+            "task_types": task_types or [],
         }
         if power_metrics:
             payload["power_metrics"] = power_metrics

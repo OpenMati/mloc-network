@@ -53,7 +53,7 @@ class Lifecycle:
             metrics["power"] = power_sample
         return metrics
 
-    def start(self, env: Dict[str, Any], hardware: Dict[str, Any], tags: List[str]):
+    def start(self, env: Dict[str, Any], hardware: Dict[str, Any], tags: List[str], task_types: Optional[List[str]] = None):
         self._started_ts = time.time()
         try:
             initial_power = self.power_monitor.sample()
@@ -66,6 +66,7 @@ class Lifecycle:
             env=env,
             hardware=hardware,
             tags=tags,
+            task_types=task_types or [],
             cost_per_hour=self.cost_per_hour,
             power_metrics=initial_power,
         )

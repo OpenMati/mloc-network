@@ -9,7 +9,7 @@ from mloc_sdk.worker import WorkerSDK
 class HelloWorldExecutor(BaseExecutor):
     """My first executor - says hello!"""
 
-    name = "hello-world"
+    taskType = "hello-world"
     description = "A simple hello world executor"
     version = "1.0.0"
 

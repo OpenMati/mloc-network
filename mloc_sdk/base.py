@@ -18,14 +18,14 @@ class ExecutorConfig:
     """Configuration for an executor.
 
     Attributes:
-        name: Unique identifier for the executor (used in taskType)
+        taskType: Unique identifier for the executor (matches task spec taskType)
         description: Human-readable description of what the executor does
         version: Version string for the executor
         requires_gpu: Whether this executor requires GPU support
         required_dependencies: List of Python packages required
         tags: Optional tags for filtering/discovery
     """
-    name: str
+    taskType: str
     description: str = ""
     version: str = "1.0.0"
     requires_gpu: bool = False
@@ -51,7 +51,7 @@ class BaseExecutor(ABC):
         from pathlib import Path
 
         class MyExecutor(BaseExecutor):
-            name = "my-executor"
+            taskType = "my-executor"
             description = "Does something useful"
 
             def execute(self, task_spec, output_dir):
@@ -67,7 +67,7 @@ class BaseExecutor(ABC):
     """
 
     # Class attributes that can be overridden
-    name: str = "base-executor"
+    taskType: str = "base-executor"
     description: str = ""
     version: str = "1.0.0"
     requires_gpu: bool = False
@@ -80,7 +80,7 @@ class BaseExecutor(ABC):
             config: Optional executor configuration. If not provided, uses class attributes.
         """
         if config:
-            self.name = config.name
+            self.taskType = config.taskType
             self.description = config.description
             self.version = config.version
             self.requires_gpu = config.requires_gpu
@@ -90,7 +90,7 @@ class BaseExecutor(ABC):
     def get_config(self) -> ExecutorConfig:
         """Get the executor configuration."""
         return ExecutorConfig(
-            name=self.name,
+            taskType=self.taskType,
             description=self.description,
             version=self.version,
             requires_gpu=self.requires_gpu,
