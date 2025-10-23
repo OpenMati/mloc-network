@@ -24,6 +24,7 @@ class WorkerConfig:
     hb_ttl_sec: int
     worker_id: str
     tags: List[str]
+    description: str
     log_level: str
     cost_per_hour: float
     use_websocket: bool
@@ -45,6 +46,7 @@ class WorkerConfig:
         worker_id = os.getenv("WORKER_ID", "").strip() or os.urandom(8).hex()
         tags = [t.strip() for t in os.getenv(
             "WORKER_TAGS", "").split(',') if t.strip()]
+        description = os.getenv("WORKER_DESCRIPTION", "").strip()
 
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -78,6 +80,7 @@ class WorkerConfig:
             hb_ttl_sec=hb_ttl,
             worker_id=worker_id,
             tags=tags,
+            description=description,
             log_level=log_level,
             cost_per_hour=cost_per_hour,
             use_websocket=use_websocket,

@@ -41,6 +41,8 @@ class Worker(BaseModel):
     env: Dict[str, Any] = Field(default_factory=dict)
     hardware: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
+    task_types: List[str] = Field(default_factory=list)  # Supported task types
+    description: str = Field(default="")  # Worker description
     # ISO timestamp of last status update
     last_seen: Optional[str] = None
 
@@ -85,6 +87,7 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
     env = _loads(h.get("env_json"), {})
     hardware = _loads(h.get("hardware_json"), {})
     tags = _loads(h.get("tags_json"), [])
+    task_types = _loads(h.get("task_types_json"), [])
 
     pid_val = h.get("pid")
     try:
@@ -100,6 +103,8 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
         env=env,
         hardware=hardware,
         tags=tags,
+        task_types=task_types,
+        description=h.get("description", ""),
         last_seen=h.get("last_seen") or None,
     )
 

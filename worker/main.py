@@ -125,10 +125,20 @@ def main():
         power_monitor=PowerMonitor(),
         websocket_client=websocket_client,
     )
-    lifecycle.start(env={}, hardware=collect_hw(), tags=cfg.tags)
 
     executors, default_executor = initialize_executors(
         logger, cuda_available=False)
+    
+    # Collect supported task types from initialized executors
+    task_types = list(executors.keys())
+    
+    lifecycle.start(
+        env={}, 
+        hardware=collect_hw(), 
+        tags=cfg.tags, 
+        description=cfg.description,
+        task_types=task_types
+    )
 
     runner = Runner(
         lifecycle,

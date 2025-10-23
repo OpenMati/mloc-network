@@ -262,6 +262,7 @@ def _register_websocket_worker(event: WorkerEvent) -> None:
     cost_per_hour = payload.get("cost_per_hour", 0.0)
     tags = event.tags or []
     task_types = payload.get("task_types", [])
+    description = payload.get("description", "")
 
     data = {
         "worker_id": worker_id,
@@ -272,6 +273,7 @@ def _register_websocket_worker(event: WorkerEvent) -> None:
         "hardware_json": json.dumps(hardware, ensure_ascii=False),
         "tags_json": json.dumps(tags, ensure_ascii=False),
         "task_types_json": json.dumps(task_types, ensure_ascii=False),
+        "description": description,
         "last_seen": event.ts or now_iso(),
         "cost_per_hour": str(cost_per_hour),
     }
@@ -283,8 +285,8 @@ def _register_websocket_worker(event: WorkerEvent) -> None:
         p.execute()
 
     logger.info(
-        "Registered WebSocket worker %s to Redis (tags: %s, task_types: %s)", 
-        worker_id, tags, task_types)
+        "Registered WebSocket worker %s to Redis (tags: %s, task_types: %s, description: %s)", 
+        worker_id, tags, task_types, description)
 
 
 def _update_websocket_worker_heartbeat(event: WorkerEvent) -> None:

@@ -53,6 +53,7 @@ class WorkerSDK:
         results_dir: Optional[Path] = None,
         log_level: str = "INFO",
         tags: Optional[List[str]] = None,
+        description: Optional[str] = None,
     ):
         """
         Initialize the Worker SDK.
@@ -63,6 +64,7 @@ class WorkerSDK:
             results_dir: Directory for task outputs (default: ./results_workers)
             log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
             tags: Optional tags for worker filtering/discovery
+            description: Optional worker description
         """
         # Configuration
         self.worker_id = worker_id or os.getenv(
@@ -74,6 +76,7 @@ class WorkerSDK:
         self.log_level = log_level or os.getenv("LOG_LEVEL", "INFO")
         self.tags = tags or [t.strip() for t in os.getenv(
             "WORKER_TAGS", "").split(",") if t.strip()]
+        self.description = description or os.getenv("WORKER_DESCRIPTION", "")
 
         # Ensure results directory exists
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -246,14 +249,16 @@ class WorkerSDK:
                 self._ws_client, '_on_connect_callback', None)
 
             def on_connect_with_lifecycle():
-                # Start lifecycle (sends REGISTER event with task_types)
+                # Start lifecycle (sends REGISTER event with task_types and description)
                 self._lifecycle.start(
                     env={}, 
                     hardware=hw_info, 
                     tags=self.tags,
+                    description=self.description,
                     task_types=task_types
                 )
-                self.logger.info("Worker lifecycle started with task_types: %s", task_types)
+                self.logger.info("Worker lifecycle started with task_types: %s, description: %s", 
+                                task_types, self.description)
                 # Call original callback if exists
                 if original_on_connect and callable(original_on_connect):
                     original_on_connect()

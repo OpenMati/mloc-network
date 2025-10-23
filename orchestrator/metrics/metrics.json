@@ -1,13 +1,13 @@
 {
-  "last_updated": "2025-10-23T11:55:46.892411+00:00",
+  "last_updated": "2025-10-23T12:09:06.070086+00:00",
   "counters": {
-    "tasks_submitted": 5,
-    "tasks_succeeded": 5,
+    "tasks_submitted": 0,
+    "tasks_succeeded": 0,
     "tasks_failed": 0,
     "tasks_requeued": 0,
     "workers_registered": 1,
     "workers_unregistered": 0,
-    "worker_heartbeats": 20
+    "worker_heartbeats": 1
   },
   "active_workers": [
     "hello-worker"
@@ -15,12 +15,12 @@
   "active_workers_count": 1,
   "task_timings": {
     "overall": {
-      "queue_avg_sec": 1.237966775894165,
-      "queue_samples": 5,
-      "execution_avg_sec": 0.010820245742797852,
-      "execution_samples": 5,
-      "total_avg_sec": 1.2488399982452392,
-      "total_samples": 5
+      "queue_avg_sec": null,
+      "queue_samples": 0,
+      "execution_avg_sec": null,
+      "execution_samples": 0,
+      "total_avg_sec": null,
+      "total_samples": 0
     },
     "inference": {
       "queue_avg_sec": null,
@@ -39,21 +39,21 @@
       "total_samples": 0
     },
     "other": {
-      "queue_avg_sec": 1.237966775894165,
-      "queue_samples": 5,
-      "execution_avg_sec": 0.010820245742797852,
-      "execution_samples": 5,
-      "total_avg_sec": 1.2488399982452392,
-      "total_samples": 5
+      "queue_avg_sec": null,
+      "queue_samples": 0,
+      "execution_avg_sec": null,
+      "execution_samples": 0,
+      "total_avg_sec": null,
+      "total_samples": 0
     }
   },
   "slo": {
     "overall": {
-      "with_slo": 2,
-      "met": 2,
+      "with_slo": 0,
+      "met": 0,
       "breached": 0,
-      "missing": 3,
-      "completion_rate": 1.0
+      "missing": 0,
+      "completion_rate": null
     },
     "inference": {
       "with_slo": 0,
@@ -70,11 +70,11 @@
       "completion_rate": null
     },
     "other": {
-      "with_slo": 2,
-      "met": 2,
+      "with_slo": 0,
+      "met": 0,
       "breached": 0,
-      "missing": 3,
-      "completion_rate": 1.0
+      "missing": 0,
+      "completion_rate": null
     }
   },
   "workers": {
@@ -82,7 +82,7 @@
       "hello-worker": {
         "status": "active",
         "cost_per_hour": 0.0,
-        "uptime_sec": 570.1344349384308,
+        "uptime_sec": 0.016746044158935547,
         "accrued_cost_usd": 0.0,
         "avg_cpu_watts": null,
         "avg_gpu_watts": null,
@@ -98,5 +98,5 @@
       "worker_count": 1
     }
   },
-  "completed_tasks": 5
+  "completed_tasks": 0
 }

@@ -35,6 +35,7 @@ if __name__ == "__main__":
     sdk = WorkerSDK(
         worker_id="hello-worker",
         orchestrator_url="ws://localhost:8000/ws/worker",
+        description="Hello World executor for testing",
         log_level="INFO"
     )
 
