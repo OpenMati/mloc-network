@@ -60,7 +60,7 @@ class Lifecycle:
         except Exception:
             initial_power = None
         self.transport.register(
-            status="STARTING",
+            status="IDLE",
             started_at=datetime.now(timezone.utc).isoformat(),
             pid=os.getpid(),
             env=env,
@@ -71,7 +71,6 @@ class Lifecycle:
             cost_per_hour=self.cost_per_hour,
             power_metrics=initial_power,
         )
-        self.transport.set_status("IDLE")
         threading.Thread(target=self._hb_loop, daemon=True).start()
 
     def _hb_loop(self):
