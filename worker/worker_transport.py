@@ -318,6 +318,8 @@ class WebSocketTransport(WorkerTransport):
         def sender_loop():
             import asyncio
             import time
+            import logging
+            logger = logging.getLogger(__name__)
             # Create a dedicated event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -330,12 +332,23 @@ class WebSocketTransport(WorkerTransport):
                         # Send event asynchronously
                         if self.ws_client and self.ws_client.is_connected:
                             try:
+                                logger.debug("Sending WebSocket event: type=%s, worker=%s", 
+                                           event.get("type"), event.get("worker_id"))
                                 loop.run_until_complete(
                                     self.ws_client.send_event(event))
-                            except Exception:
+                                logger.debug("WebSocket event sent successfully: type=%s", 
+                                           event.get("type"))
+                            except Exception as exc:
                                 # If send fails, put back in queue for retry
+                                logger.warning("Failed to send WebSocket event (will retry): %s", exc)
                                 self._event_queue.put(event)
                                 time.sleep(0.5)
+                        else:
+                            # Connection not ready, put event back and wait
+                            logger.debug("WebSocket not connected, requeuing event: type=%s", 
+                                       event.get("type"))
+                            self._event_queue.put(event)
+                            time.sleep(0.1)
                     except:  # queue.Empty or other exceptions
                         continue
             finally:
@@ -351,10 +364,18 @@ class WebSocketTransport(WorkerTransport):
             # Queue the event for immediate sending by background thread
             # This returns immediately without blocking
             self._event_queue.put(event, block=False)
-        except Exception:
+            # Debug logging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug("Queued WebSocket event for sending: type=%s, worker=%s", 
+                        event.get("type"), event.get("worker_id"))
+        except Exception as exc:
             # If queue is full or other error, cache the event
             if event not in self._cached_events:
                 self._cached_events.append(event)
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("Failed to queue event, caching instead: %s", exc)
 
     def register(
         self,
@@ -385,6 +406,7 @@ class WebSocketTransport(WorkerTransport):
         }
 
         payload = {
+            "pid": pid,
             "env": env,
             "hardware": hardware,
             "description": description,
