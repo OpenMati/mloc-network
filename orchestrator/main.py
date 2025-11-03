@@ -94,12 +94,23 @@ async def require_auth(request: Request):
 # -------------------------
 # Request Models
 # -------------------------
+
+
 class SimpleTaskRequest(BaseModel):
     """Simplified task submission request."""
     taskType: str
     input: Dict[str, Any]
     sloSeconds: Optional[int] = None
     tags: Optional[List[str]] = None
+
+
+class SimpleQARequest(BaseModel):
+    """Simplified QA submission request."""
+    taskType: str = None
+    input: Dict[str, Any]
+    sloSeconds: Optional[int] = None
+    tags: Optional[List[str]] = None
+
 
 # -------------------------
 # Models
@@ -285,7 +296,7 @@ def _register_websocket_worker(event: WorkerEvent) -> None:
         p.execute()
 
     logger.info(
-        "Registered WebSocket worker %s to Redis (tags: %s, task_types: %s, description: %s)", 
+        "Registered WebSocket worker %s to Redis (tags: %s, task_types: %s, description: %s)",
         worker_id, tags, task_types, description)
 
 
@@ -347,8 +358,8 @@ async def websocket_worker_endpoint(websocket: WebSocket, worker_id: str):
     async def handle_worker_event(event_data: Dict[str, Any]):
         """Process events received from worker via WebSocket."""
         try:
-            logger.info("Received WebSocket event from worker %s: type=%s",
-                        worker_id, event_data.get("type"))
+            logger.debug("Received WebSocket event from worker %s: type=%s",
+                         worker_id, event_data.get("type"))
             # Parse and handle the event similar to Redis events
             event = parse_event(event_data)
 
@@ -1188,11 +1199,11 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
     return {"ok": True, "count": len(entries), "tasks": results}
 
 
-@app.post("/api/v1/tasks/simple")
-async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_auth)):
+@app.post("/api/v1/tasks/qa")
+async def submit_simple_qa(req: SimpleQARequest, _: Any = Depends(require_auth)):
     """
-    Submit a simple task with minimal configuration.
-    
+    Submit a simple qa task with minimal configuration.
+
     Automatically constructs a full task spec with:
     - Minimal hardware requirements (1 CPU, 1Gi memory)
     - No dependencies
@@ -1201,12 +1212,135 @@ async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_au
     """
     import uuid
     import yaml
-    
+
     # Get orchestrator URL from environment or construct default
     orchestrator_host = os.getenv("ORCHESTRATOR_HOST", "localhost")
     orchestrator_port = parse_int_env("PORT", 8000)
     orchestrator_url = f"http://{orchestrator_host}:{orchestrator_port}/api/v1/results"
-    
+
+    # Construct the full task YAML
+    task_spec = {
+        "apiVersion": "v1",
+        "kind": "Task",
+        "metadata": {
+            "name": f"openrouter-llm-{uuid.uuid4().hex[:8]}"
+        },
+        "spec": {
+            "taskType": "openrouter-llm",
+            "resources": {
+                "replicas": 1,
+                "hardware": {
+                    "cpu": "1",
+                    "memory": "1Gi"
+                }
+            },
+            "output": {
+                "destination": {
+                    "type": "http",
+                    "url": orchestrator_url,
+                    "method": "POST",
+                    "timeoutSec": 30
+                },
+                "artifacts": [
+                    "responses.json",
+                    "logs",
+                    "artifacts"
+                ]
+            },
+            "parallel": {
+                "enabled": False
+            },
+            "dependsOn": []
+        }
+    }
+
+    task_spec["spec"]["input"] = req.input
+
+    # Convert to YAML
+    yml = yaml.dump(task_spec, default_flow_style=False, allow_unicode=True)
+
+    # Parse and register the task using existing logic
+    entries = TASK_STORE.parse_and_register(yml)
+    results: List[Dict[str, Any]] = []
+
+    for entry in entries:
+        task_id = entry["task_id"]
+        task = entry["parsed"]
+        depends_on = entry["depends_on"]
+        slo_seconds = entry.get("slo_seconds")
+        task_type = (task.get("spec") or {}).get("taskType")
+        category = categorize_task_type(task_type)
+
+        with TASKS_LOCK:
+            rec_obj = TaskRecord(
+                task_id=task_id,
+                raw_yaml=yml,
+                parsed=task,
+                graph_node_name=entry.get("graph_node_name"),
+                load=int(entry.get("load", 0) or 0),
+                slo_seconds=slo_seconds,
+                task_type=task_type,
+                category=category,
+            )
+            rec_obj.last_queue_ts = rec_obj.submitted_ts
+            TASKS[task_id] = rec_obj
+
+        DISPATCHER.enqueue_for_dispatch(task_id, task, rec_obj)
+        METRICS_RECORDER.record_task_event(
+            TaskEvent(
+                type="TASK_SUBMITTED",
+                task_id=task_id,
+                payload={
+                    "taskType": task_type,
+                    "sloSeconds": slo_seconds,
+                    "simple_api": True,
+                },
+            )
+        )
+
+        with TASKS_LOCK:
+            rec = TASKS[task_id]
+            results.append({
+                "task_id": task_id,
+                "status": rec.status,
+                "assigned_worker": rec.assigned_worker,
+                "topic": rec.topic,
+                "waiting_on": depends_on or [],
+                "retries": rec.retries,
+                "max_retries": rec.max_retries,
+                "load": rec.load,
+            })
+
+    TASK_STORE.flush_pool()
+    _state_mark_dirty()
+
+    return {
+        "ok": True,
+        "count": len(entries),
+        "tasks": results,
+        "generated_yaml": yml
+    }
+
+
+@app.post("/api/v1/tasks/simple")
+async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_auth)):
+    """
+    Submit a simple task with minimal configuration.
+
+    Automatically constructs a full task spec with:
+    - Minimal hardware requirements (1 CPU, 1Gi memory)
+    - No dependencies
+    - HTTP result submission to orchestrator
+    - Standard output artifacts
+    """
+    import uuid
+    import yaml
+
+    # Get orchestrator URL from environment or construct default
+    orchestrator_host = os.getenv("ORCHESTRATOR_HOST", "localhost")
+    orchestrator_port = parse_int_env("PORT", 8000)
+    orchestrator_url = f"http://{orchestrator_host}:{orchestrator_port}/api/v1/results"
+
     # Construct the full task YAML
     task_spec = {
         "apiVersion": "v1",
@@ -1242,7 +1376,7 @@ async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_au
             "dependsOn": []
         }
     }
-    
+
     # Add the user's input based on taskType
     if req.taskType == "echo":
         # For echo tasks, expect data structure
@@ -1250,21 +1384,21 @@ async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_au
     else:
         # For other task types, use input directly
         task_spec["spec"]["input"] = req.input
-    
+
     # Add optional fields
     if req.sloSeconds:
         task_spec["spec"]["sloSeconds"] = req.sloSeconds
-    
+
     if req.tags:
         task_spec["spec"]["tags"] = req.tags
-    
+
     # Convert to YAML
     yml = yaml.dump(task_spec, default_flow_style=False, allow_unicode=True)
-    
+
     # Parse and register the task using existing logic
     entries = TASK_STORE.parse_and_register(yml)
     results: List[Dict[str, Any]] = []
-    
+
     for entry in entries:
         task_id = entry["task_id"]
         task = entry["parsed"]
@@ -1272,7 +1406,7 @@ async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_au
         slo_seconds = entry.get("slo_seconds")
         task_type = (task.get("spec") or {}).get("taskType")
         category = categorize_task_type(task_type)
-        
+
         with TASKS_LOCK:
             rec_obj = TaskRecord(
                 task_id=task_id,
@@ -1286,7 +1420,7 @@ async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_au
             )
             rec_obj.last_queue_ts = rec_obj.submitted_ts
             TASKS[task_id] = rec_obj
-        
+
         DISPATCHER.enqueue_for_dispatch(task_id, task, rec_obj)
         METRICS_RECORDER.record_task_event(
             TaskEvent(
@@ -1299,7 +1433,7 @@ async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_au
                 },
             )
         )
-        
+
         with TASKS_LOCK:
             rec = TASKS[task_id]
             results.append({
@@ -1312,10 +1446,10 @@ async def submit_simple_task(req: SimpleTaskRequest, _: Any = Depends(require_au
                 "max_retries": rec.max_retries,
                 "load": rec.load,
             })
-    
+
     TASK_STORE.flush_pool()
     _state_mark_dirty()
-    
+
     return {
         "ok": True,
         "count": len(entries),
