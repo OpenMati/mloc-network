@@ -132,6 +132,7 @@ def update_worker_status(rds, worker_id: str, status: str) -> None:
     """
     Update worker status and publish a STATUS event.
     """
+    import redis
     now = now_iso()
     payload = {
         "type": "STATUS",
@@ -139,11 +140,22 @@ def update_worker_status(rds, worker_id: str, status: str) -> None:
         "status": status,
         "ts": now,
     }
-    with rds.pipeline() as p:
-        p.hset(r_worker_key(worker_id), mapping={
-               "status": status, "last_seen": now})
-        p.publish("workers.events", json.dumps(payload, ensure_ascii=False))
-        p.execute()
+    try:
+        with rds.pipeline() as p:
+            p.hset(r_worker_key(worker_id), mapping={
+                   "status": status, "last_seen": now})
+            p.publish("workers.events", json.dumps(payload, ensure_ascii=False))
+            p.execute()
+    except redis.exceptions.ReadOnlyError as e:
+        logger.warning(
+            "Cannot update worker %s status: Redis is in read-only mode: %s",
+            worker_id, e
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to update worker %s status: %s",
+            worker_id, e
+        )
 
 
 def unregister_worker(rds, worker_id: str) -> None:
@@ -151,14 +163,26 @@ def unregister_worker(rds, worker_id: str) -> None:
     Remove worker from the set and delete its hash/heartbeat keys.
     Publish an UNREGISTER event.
     """
+    import redis
     payload = {"type": "UNREGISTER", "worker_id": worker_id, "ts": now_iso()}
-    with rds.pipeline() as p:
-        p.srem(WORKERS_SET, worker_id)
-        p.delete(r_worker_key(worker_id))
-        p.delete(r_hb_key(worker_id))
-        p.publish("workers.events", json.dumps(payload, ensure_ascii=False))
-        p.execute()
-    logger.info("Worker unregistered: %s", worker_id)
+    try:
+        with rds.pipeline() as p:
+            p.srem(WORKERS_SET, worker_id)
+            p.delete(r_worker_key(worker_id))
+            p.delete(r_hb_key(worker_id))
+            p.publish("workers.events", json.dumps(payload, ensure_ascii=False))
+            p.execute()
+        logger.info("Worker unregistered: %s", worker_id)
+    except redis.exceptions.ReadOnlyError as e:
+        logger.warning(
+            "Cannot unregister worker %s: Redis is in read-only mode: %s",
+            worker_id, e
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to unregister worker %s: %s",
+            worker_id, e
+        )
 
 
 def cleanup_stale_workers(rds) -> int:

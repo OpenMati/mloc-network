@@ -169,8 +169,18 @@ class TaskPool:
                     # Store entry metadata
                     meta_key = f"{self._pool_metadata_prefix}{entry.task_id}"
                     self._redis.set(meta_key, self._serialize_entry(entry))
-                except Exception:
-                    pass  # Continue even if Redis fails
+                except Exception as e:
+                    import redis
+                    if isinstance(e, redis.exceptions.ReadOnlyError):
+                        self._logger.warning(
+                            "Cannot add task %s to pool: Redis is in read-only mode",
+                            entry.task_id
+                        )
+                    else:
+                        self._logger.error(
+                            "Failed to add task %s to Redis pool: %s",
+                            entry.task_id, e
+                        )
 
             return self._flush_if_needed_locked()
 
@@ -185,8 +195,16 @@ class TaskPool:
                         self._redis.sadd(self._pool_key, entry.task_id)
                         meta_key = f"{self._pool_metadata_prefix}{entry.task_id}"
                         self._redis.set(meta_key, self._serialize_entry(entry))
-                except Exception:
-                    pass
+                except Exception as e:
+                    import redis
+                    if isinstance(e, redis.exceptions.ReadOnlyError):
+                        self._logger.warning(
+                            "Cannot requeue tasks: Redis is in read-only mode"
+                        )
+                    else:
+                        self._logger.error(
+                            "Failed to requeue tasks to Redis pool: %s", e
+                        )
 
     def pop_due(self) -> List[PoolEntry]:
         """
@@ -229,8 +247,18 @@ class TaskPool:
                     self._redis.srem(self._pool_key, task_id)
                     meta_key = f"{self._pool_metadata_prefix}{task_id}"
                     self._redis.delete(meta_key)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import redis
+                    if isinstance(e, redis.exceptions.ReadOnlyError):
+                        self._logger.warning(
+                            "Cannot clear task %s: Redis is in read-only mode",
+                            task_id
+                        )
+                    else:
+                        self._logger.error(
+                            "Failed to clear task %s from Redis: %s",
+                            task_id, e
+                        )
 
     def has_entries(self) -> bool:
         with self._thread_lock:
@@ -293,8 +321,16 @@ class TaskPool:
                     self._redis.srem(self._pool_key, b.task_id)
                     meta_key = f"{self._pool_metadata_prefix}{b.task_id}"
                     self._redis.delete(meta_key)
-            except Exception:
-                pass
+            except Exception as e:
+                import redis
+                if isinstance(e, redis.exceptions.ReadOnlyError):
+                    self._logger.warning(
+                        "Cannot remove batch from pool: Redis is in read-only mode"
+                    )
+                else:
+                    self._logger.error(
+                        "Failed to remove batch from Redis pool: %s", e
+                    )
 
         return batch
 

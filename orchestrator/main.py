@@ -289,15 +289,26 @@ def _register_websocket_worker(event: WorkerEvent) -> None:
         "cost_per_hour": str(cost_per_hour),
     }
 
-    with rds.pipeline() as p:
-        p.sadd(WORKERS_SET, worker_id)
-        p.hset(r_worker_key(worker_id), mapping=data)
-        p.setex(r_hb_key(worker_id), 120, event.ts or now_iso())
-        p.execute()
+    try:
+        with rds.pipeline() as p:
+            p.sadd(WORKERS_SET, worker_id)
+            p.hset(r_worker_key(worker_id), mapping=data)
+            p.setex(r_hb_key(worker_id), 120, event.ts or now_iso())
+            p.execute()
 
-    logger.info(
-        "Registered WebSocket worker %s to Redis (tags: %s, task_types: %s, description: %s)",
-        worker_id, tags, task_types, description)
+        logger.info(
+            "Registered WebSocket worker %s to Redis (tags: %s, task_types: %s, description: %s)",
+            worker_id, tags, task_types, description)
+    except redis.exceptions.ReadOnlyError as e:
+        logger.warning(
+            "Cannot register worker %s: Redis is in read-only mode: %s",
+            worker_id, e
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to register worker %s: %s",
+            worker_id, e
+        )
 
 
 def _update_websocket_worker_heartbeat(event: WorkerEvent) -> None:
@@ -307,10 +318,21 @@ def _update_websocket_worker_heartbeat(event: WorkerEvent) -> None:
     worker_id = event.worker_id
     ts = event.ts or now_iso()
 
-    with rds.pipeline() as p:
-        p.setex(r_hb_key(worker_id), 120, ts)
-        p.hset(r_worker_key(worker_id), mapping={"last_seen": ts})
-        p.execute()
+    try:
+        with rds.pipeline() as p:
+            p.setex(r_hb_key(worker_id), 120, ts)
+            p.hset(r_worker_key(worker_id), mapping={"last_seen": ts})
+            p.execute()
+    except redis.exceptions.ReadOnlyError as e:
+        logger.warning(
+            "Cannot update worker %s heartbeat: Redis is in read-only mode: %s",
+            worker_id, e
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to update worker %s heartbeat: %s",
+            worker_id, e
+        )
 
 
 def _update_websocket_worker_status(event: WorkerEvent) -> None:
@@ -326,7 +348,18 @@ def _update_websocket_worker_status(event: WorkerEvent) -> None:
     if payload:
         mapping.update({f"extra_{k}": str(v) for k, v in payload.items()})
 
-    rds.hset(r_worker_key(worker_id), mapping=mapping)
+    try:
+        rds.hset(r_worker_key(worker_id), mapping=mapping)
+    except redis.exceptions.ReadOnlyError as e:
+        logger.warning(
+            "Cannot update worker %s status: Redis is in read-only mode: %s",
+            worker_id, e
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to update worker %s status: %s",
+            worker_id, e
+        )
 
 
 def _unregister_websocket_worker(event: WorkerEvent) -> None:
