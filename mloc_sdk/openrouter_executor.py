@@ -340,9 +340,17 @@ if __name__ == "__main__":
         print("Please set it with: export OPENROUTER_API_KEY='your-api-key'")
         sys.exit(1)
     
+    # Get worker_id from environment variable, or generate a random UUID if not set
+    worker_id = os.getenv("WORKER_ID")
+    if not worker_id:
+        worker_id = f"openrouter-worker-{uuid.uuid4()}"
+        print(f"No WORKER_ID environment variable set, generated: {worker_id}")
+    else:
+        print(f"Using WORKER_ID from environment: {worker_id}")
+    
     # Create SDK
     sdk = WorkerSDK(
-        worker_id="openrouter-worker-001",
+        worker_id=worker_id,
         orchestrator_url="ws://localhost:8000/ws/worker",
         description="OpenRouter LLM executor for question answering",
         log_level="INFO"
