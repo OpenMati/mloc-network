@@ -118,8 +118,8 @@ class TaskPool:
         try:
             # Get all task_ids from the Redis set
             task_ids = self._redis.smembers(self._pool_key)
-            self._logger.info(
-                f"[TaskPool._get_all_entries] Found {len(task_ids) if task_ids else 0} task IDs in Redis set '{self._pool_key}'")
+            # self._logger.info(
+            #     f"[TaskPool._get_all_entries] Found {len(task_ids) if task_ids else 0} task IDs in Redis set '{self._pool_key}'")
             if not task_ids:
                 return {}
 
@@ -154,8 +154,8 @@ class TaskPool:
                 f"[TaskPool._get_all_entries] Critical error retrieving entries: {e}")
             return {}
 
-        self._logger.info(
-            f"[TaskPool._get_all_entries] Successfully retrieved {len(entries)} entries")
+        # self._logger.info(
+        #     f"[TaskPool._get_all_entries] Successfully retrieved {len(entries)} entries")
         return entries
 
     def add(self, entry: PoolEntry) -> List[PoolEntry]:
@@ -213,30 +213,30 @@ class TaskPool:
         """
         with self._thread_lock:
             entries = self._get_all_entries()
-            self._logger.info(
-                f"[pop_due] Retrieved {len(entries)} entries from Redis")
+            # self._logger.info(
+            #     f"[pop_due] Retrieved {len(entries)} entries from Redis")
             if not entries:
                 return []
 
             # Check if batch size threshold is met
-            self._logger.info(
-                f"[pop_due] Batch size check: {len(entries)} >= {self._batch_size}")
+            # self._logger.info(
+            #     f"[pop_due] Batch size check: {len(entries)} >= {self._batch_size}")
             if len(entries) >= self._batch_size:
                 batch = self._take_n_locked(self._batch_size, entries)
-                self._logger.info(
-                    f"[pop_due] Batch size threshold met, returning {len(batch)} tasks")
+                # self._logger.info(
+                #     f"[pop_due] Batch size threshold met, returning {len(batch)} tasks")
                 return batch
 
             # Check if any entry has reached SLO threshold
             now = time.time()
             if any(e.slo_progress(now) >= self._slo_fraction for e in entries.values()):
                 batch = self._take_n_locked(self._batch_size, entries)
-                self._logger.info(
-                    f"[pop_due] SLO threshold met, returning {len(batch)} tasks")
+                # self._logger.info(
+                #     f"[pop_due] SLO threshold met, returning {len(batch)} tasks")
                 return batch
 
-            self._logger.info(
-                f"[pop_due] No threshold met, returning empty list")
+            # self._logger.info(
+            #     f"[pop_due] No threshold met, returning empty list")
             return []
 
     def clear_task(self, task_id: str) -> None:
@@ -492,8 +492,8 @@ class TaskPoolManager:
 
     def _dispatch_batch(self, entries: List[PoolEntry]) -> None:
         """Filter, optimize and dispatch the given batch; requeue deferred entries."""
-        self._logger.info(
-            f"[_dispatch_batch] Processing batch of {len(entries)} entries")
+        # self._logger.info(
+        #     f"[_dispatch_batch] Processing batch of {len(entries)} entries")
         ready_entries: List[PoolEntry] = []
         deferred: List[PoolEntry] = []
 
@@ -514,8 +514,8 @@ class TaskPoolManager:
                 deferred.append(entry)
                 continue
             if not self._is_retry_due(actual_record):
-                self._logger.info(
-                    f"[_dispatch_batch] Task {entry.task_id} deferred: retry not due yet")
+                # self._logger.info(
+                #     f"[_dispatch_batch] Task {entry.task_id} deferred: retry not due yet")
                 deferred.append(entry)
                 continue
             status = getattr(actual_record, "status", None)
@@ -526,8 +526,8 @@ class TaskPoolManager:
                 continue
             ready_entries.append(entry)
 
-        self._logger.info(
-            f"[_dispatch_batch] Ready: {len(ready_entries)}, Deferred: {len(deferred)}")
+        # self._logger.info(
+        #     f"[_dispatch_batch] Ready: {len(ready_entries)}, Deferred: {len(deferred)}")
 
         if deferred:
             self._pool.requeue(deferred)
